@@ -1,0 +1,26 @@
+{
+  "version": 0,
+  "meta": {
+    "name": "DEFAULT",
+    "brandVersion": "n/a"
+  },
+  "images": {},
+  "translations": {},
+  "videoShare": {
+    "uploadServer": "https://pexip-apps.yaoufi.com",
+    "apiKey": "02b79ee7a464f76844f8b8aa936e70e8a6c463ce461436db8d5629a8468490a7"
+  },
+  "plugins": [
+    {
+      "id": "video-share2",
+      "src": "./plugins/video-share2/index.html",
+      "sandboxValues": [
+        "allow-scripts",
+        "allow-same-origin",
+        "allow-forms",
+        "allow-popups",
+        "allow-popups-to-escape-sandbox"
+      ]
+    }
+  ]
+}
