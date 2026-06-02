@@ -22,7 +22,9 @@ function authHeaders(): HeadersInit {
 }
 
 let selfUuid = params.get('selfUuid') ?? '';
-let selfName  = isSharer ? sharerName : 'Viewer';
+// selfName comes from main.ts (which has the real display name from plugin.events.me).
+// Widget's own me event is unreliable — don't rely on it for the name.
+let selfName  = isSharer ? sharerName : (params.get('selfName') || 'Viewer');
 
 plugin.events.me.add((me: unknown) => {
   const p = me as Record<string, string>;
@@ -60,9 +62,14 @@ const viewerFsBtn   = document.getElementById('viewer-fs-btn')  as HTMLButtonEle
 let currentUrl    = '';
 let isSeeking_    = false;
 let seekRafId     = 0;
-let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
-let syncPollTimer: ReturnType<typeof setInterval> | null  = null;
+let heartbeatTimer:    ReturnType<typeof setInterval> | null = null;
+let syncPollTimer:     ReturnType<typeof setInterval> | null = null;
+let viewerCountTimer:  ReturnType<typeof setInterval> | null = null;
 let lastSyncAt    = 0;   // timestamp of last sync-state we applied (viewer debounce)
+
+// Stable per-session viewer ID (independent of selfUuid which arrives late)
+const viewerId = `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+let viewerRegistered = false;
 
 // ── File picker ────────────────────────────────────────────────────────────
 fileDrop.addEventListener('dragover', e => { e.preventDefault(); fileDrop.classList.add('drag-over'); });
@@ -198,12 +205,10 @@ seekBarEl.addEventListener('change', () => {
 
 stopBtn.addEventListener('click', () => {
   deleteUploadedFile(currentUrl);
-  // Signal stop via server — same relay pattern as video:open.
-  // main.ts polls /stop-signal and calls sendApplicationMessage from the trusted plugin context.
+  stopViewerCount();
   if (sessionId && UPLOAD_SERVER) {
     fetch(`${UPLOAD_SERVER}/stop-signal/${sessionId}`, {
-      method: 'POST',
-      headers: { ...authHeaders() },
+      method: 'POST', headers: { ...authHeaders() },
     }).catch(() => undefined);
   }
   stopHeartbeat();
@@ -260,6 +265,7 @@ function startSyncPoll() {
 }
 function stopSyncPoll() {
   if (syncPollTimer) { clearInterval(syncPollTimer); syncPollTimer = null; }
+  unregisterAsViewer();
 }
 
 async function applySyncFromServer() {
@@ -268,9 +274,12 @@ async function applySyncFromServer() {
     const res  = await fetch(`${UPLOAD_SERVER}/sync-state/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
     const data = await res.json() as { time: number; playing: boolean; updatedAt: number } | null;
     if (!data) return;
-    // Only apply if the state is recent (within last 60 seconds)
+    // Sharer disconnect detection — no sync update for >30 s means they stopped sharing
     const age = (Date.now() - data.updatedAt) / 1000;
-    if (age > 60) return;
+    if (age > 30) {
+      setStatus('⚠ Sharer may have disconnected.', true);
+      return;
+    }
 
     // Project the sharer's position forward by how long ago the state was saved.
     // Without this, a 10s-old heartbeat at time=90 would make the viewer seek
@@ -362,6 +371,47 @@ plugin.events.applicationMessage.add((event: unknown) => {
 });
 
 // ── UI helpers ─────────────────────────────────────────────────────────────
+// ── Viewer presence ────────────────────────────────────────────────────────
+
+function registerAsViewer() {
+  if (isSharer || !sessionId || !UPLOAD_SERVER || viewerRegistered) return;
+  viewerRegistered = true;
+
+  // selfName is passed from main.ts via URL params — already the real display name.
+  fetch(`${UPLOAD_SERVER}/viewers/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ id: viewerId, name: selfName }),
+  }).catch(() => undefined);
+}
+
+function unregisterAsViewer() {
+  if (!viewerRegistered || !sessionId || !UPLOAD_SERVER) return;
+  viewerRegistered = false;
+  fetch(`${UPLOAD_SERVER}/viewers/${sessionId}/${viewerId}`, {
+    method: 'DELETE', headers: authHeaders(),
+  }).catch(() => undefined);
+}
+
+// Sharer: poll viewer count every 5 s and show in controls bar
+function startViewerCount() {
+  const countEl = document.getElementById('viewer-count');
+  if (!countEl || !sessionId || !UPLOAD_SERVER) return;
+  viewerCountTimer = setInterval(async () => {
+    try {
+      const res  = await fetch(`${UPLOAD_SERVER}/viewers/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
+      const data = await res.json() as { count: number; viewers: { name: string }[] };
+      countEl.textContent = String(data.count);
+      const presence = document.getElementById('viewer-presence');
+      if (presence) presence.title = data.viewers.map(v => v.name).join(', ') || 'No viewers yet';
+    } catch { /* server unreachable */ }
+  }, 5000);
+}
+
+function stopViewerCount() {
+  if (viewerCountTimer) { clearInterval(viewerCountTimer); viewerCountTimer = null; }
+}
+
 function showPlayer(asSharer: boolean) {
   shareFormEl.style.display  = 'none';
   playerViewEl.style.display = 'flex';
@@ -370,7 +420,11 @@ function showPlayer(asSharer: boolean) {
   pushSyncBtn.style.display  = asSharer ? ''      : 'none';
   pullSyncBtn.style.display  = asSharer ? ''      : 'none';
   if (!asSharer && sharerName) sharerLabel.textContent = sharerName;
-  if (!asSharer) startSyncPoll();
+  if (!asSharer) {
+    startSyncPoll();
+    registerAsViewer();
+  }
+  if (asSharer) startViewerCount();
 }
 
 function showForm() {
@@ -395,4 +449,11 @@ if (isSharer) {
 } else if (initialUrl) {
   loadVideo(initialUrl, initTime, initPlaying);
   showPlayer(false);
+  // Late-joiner indicator — show sync message then clear after video loads
+  if (initTime > 0) {
+    setStatus('Syncing to current position…');
+    videoEl.addEventListener('loadedmetadata', () => {
+      setTimeout(() => setStatus(''), 2000);
+    }, { once: true });
+  }
 }

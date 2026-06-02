@@ -98,6 +98,32 @@ app.delete('/uploads/:filename', (req, res) => {
 });
 
 
+// ── Viewer presence tracking ──────────────────────────────────────────────
+// Viewers register when they open the player and deregister when they close.
+// Sharer polls /viewers/:sessionId to display a live watcher count + names.
+const viewers = {}; // sessionId → { [viewerId]: { name, joinedAt } }
+
+app.post('/viewers/:sessionId', (req, res) => {
+  const { id, name } = req.body;
+  if (!id) return res.status(400).json({ error: 'id required' });
+  if (!viewers[req.params.sessionId]) viewers[req.params.sessionId] = {};
+  viewers[req.params.sessionId][id] = { name: name || 'Viewer', joinedAt: Date.now() };
+  res.json({ ok: true });
+});
+
+app.delete('/viewers/:sessionId/:viewerId', (req, res) => {
+  const s = viewers[req.params.sessionId];
+  if (s) delete s[req.params.viewerId];
+  res.json({ ok: true });
+});
+
+app.get('/viewers/:sessionId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache');
+  const s = viewers[req.params.sessionId] ?? {};
+  const list = Object.values(s);
+  res.json({ count: list.length, viewers: list });
+});
+
 // ── Signaling: stop signal ────────────────────────────────────────────────
 // Widget can't call sendApplicationMessage; it POSTs here when Stop is clicked.
 // main.ts polls this and calls sendApplicationMessage({ type: 'video:stop' }).
