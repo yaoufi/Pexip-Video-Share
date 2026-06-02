@@ -52,10 +52,12 @@ let lastOpenedUrl  = ''; // deduplication — ignores repeated video:open for th
 function newShareId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`; }
 let currentShareId = '';
 
-plugin.events.me.add((me: unknown) => {
-  const p = me as Record<string, string>;
-  selfUuid = p.uuid ?? selfUuid;
-  selfName  = p.displayName ?? p.name ?? 'Participant';
+plugin.events.me.add((event: unknown) => {
+  // The me event payload is { id, participant } — participant holds uuid + displayName
+  const e = event as { participant?: Record<string, string> };
+  const p = e.participant ?? (event as Record<string, string>);
+  selfUuid = p.uuid        ?? selfUuid;
+  selfName  = p.displayName ?? p.name ?? selfName;
 });
 
 // ── Build widget URL ───────────────────────────────────────────────────────
@@ -209,7 +211,7 @@ shareBtn.onClick.add(async () => {
 
     if (currentVideo) {
       await openWidget(
-        { role: 'viewer', url: currentVideo.url, sharerName: currentVideo.sharerName, selfUuid, sessionId: currentVideo.sessionId },
+        { role: 'viewer', url: currentVideo.url, sharerName: currentVideo.sharerName, selfUuid, selfName, sessionId: currentVideo.sessionId },
         `${currentVideo.sharerName} is sharing`,
       );
       return;
@@ -251,7 +253,7 @@ plugin.events.applicationMessage.add(async (event: unknown) => {
         lastOpenedUrl = msg.url;
         currentVideo = { url: msg.url, sharerName: msg.sharerName, sessionId: sid };
         await openWidget(
-          { role: 'viewer', url: msg.url, sharerName: msg.sharerName, selfUuid, sessionId: sid },
+          { role: 'viewer', url: msg.url, sharerName: msg.sharerName, selfUuid, selfName, sessionId: sid },
           `${msg.sharerName} is sharing`,
         );
         break;
@@ -268,7 +270,7 @@ plugin.events.applicationMessage.add(async (event: unknown) => {
         currentVideo = { url: msg.url, sharerName: msg.sharerName, sessionId: sid };
         if (!activeWidget && !isSharing) {
           await openWidget(
-            { role: 'viewer', url: msg.url, sharerName: msg.sharerName, selfUuid, sessionId: sid, initTime: String(msg.time), initPlaying: String(msg.playing) },
+            { role: 'viewer', url: msg.url, sharerName: msg.sharerName, selfUuid, selfName, sessionId: sid, initTime: String(msg.time), initPlaying: String(msg.playing) },
             `${msg.sharerName} is sharing`,
           );
         }

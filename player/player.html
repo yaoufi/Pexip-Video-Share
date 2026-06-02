@@ -145,6 +145,12 @@
     }
     #viewer-bar strong { color: #8090c0; }
 
+    /* Viewer presence counter */
+    #viewer-presence {
+      font-size: 11px; color: #6070a0; white-space: nowrap;
+      flex-shrink: 0; padding: 0 4px;
+    }
+
     /* Fullscreen */
     .fs-btn {
       background: transparent; border: 1px solid #3a3a55; color: #8090c0;
@@ -199,6 +205,10 @@
       <button class="sync-btn" id="push-sync-btn" title="Push your position to viewers">⇾ Sync</button>
       <button class="sync-btn" id="pull-sync-btn" title="Pull current state from viewers">⇽ Pull</button>
       <button class="fs-btn"  id="fullscreen-btn" title="Toggle fullscreen">⛶</button>
+      <!-- Viewer presence — updated every 5 s -->
+      <span id="viewer-presence" title="Participants watching">
+        👁 <span id="viewer-count">0</span>
+      </span>
       <button class="btn btn-danger" id="stop-btn">■ Stop</button>
     </div>
 
