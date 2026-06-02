@@ -1,0 +1,3 @@
+pexip-apps.yaoufi.com {
+    reverse_proxy video-server:4001
+}

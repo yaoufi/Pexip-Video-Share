@@ -1,0 +1,33 @@
+services:
+
+  video-server:
+    build: ./server
+    container_name: vs2-server
+    volumes:
+      - uploads:/app/uploads
+    environment:
+      # Generate a key with: openssl rand -hex 32
+      # Set the same key in your branding manifest.json under videoShare.apiKey
+      - VS2_API_KEY=REPLACE_WITH_YOUR_API_KEY
+    restart: unless-stopped
+    # Not exposed to the host — Caddy reaches it via the internal Docker network
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: vs2-caddy
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"   # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # stores Let's Encrypt certs (persisted)
+      - caddy_config:/config
+    depends_on:
+      - video-server
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  caddy_data:
+  caddy_config:

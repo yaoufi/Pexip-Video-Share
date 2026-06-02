@@ -1,0 +1,8 @@
+node_modules/
+dist/
+server/node_modules/
+server/uploads/
+branding-package/webapp3/branding/plugins/video-share2/
+videoshare2-branding.zip
+*.zip
+.DS_Store
