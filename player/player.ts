@@ -32,9 +32,16 @@ plugin.events.me.add((me: unknown) => {
   selfName  = p.displayName ?? p.name ?? selfName;
 });
 
+// ── YouTube helper ─────────────────────────────────────────────────────────
+function getYouTubeId(url: string): string | null {
+  return url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/)?.[1] ?? null;
+}
+const isYouTube = !!getYouTubeId(initialUrl);
+
 // ── DOM ────────────────────────────────────────────────────────────────────
 const shareFormEl   = document.getElementById('share-form')!;
 const playerViewEl  = document.getElementById('player-view')!;
+const playerInner   = document.getElementById('player-inner')!;
 const videoEl       = document.getElementById('video') as HTMLVideoElement;
 const playOverlay   = document.getElementById('play-overlay')!;
 const peerBadge     = document.getElementById('peer-badge')!;
@@ -56,6 +63,13 @@ const timeDisplay   = document.getElementById('time-display')!;
 const pushSyncBtn   = document.getElementById('push-sync-btn') as HTMLButtonElement | null;
 const pullSyncBtn   = document.getElementById('pull-sync-btn')!;
 const stopBtn          = document.getElementById('stop-btn')!;
+// Share form elements
+const cardLocal        = document.getElementById('card-local')!;
+const cardYouTube      = document.getElementById('card-youtube')!;
+const localPanel       = document.getElementById('local-panel')!;
+const youtubePanel     = document.getElementById('youtube-panel')!;
+const youtubeUrlInput  = document.getElementById('youtube-url-input') as HTMLInputElement;
+const shareYoutubeBtn  = document.getElementById('share-youtube-btn') as HTMLButtonElement;
 const resizeBtn        = document.getElementById('resize-btn')        as HTMLButtonElement | null;
 const fullscreenBtn    = document.getElementById('fullscreen-btn')    as HTMLButtonElement | null;
 const viewerFsBtn      = document.getElementById('viewer-fs-btn')     as HTMLButtonElement | null;
@@ -77,6 +91,44 @@ let lastSyncAt    = 0;   // timestamp of last sync-state we applied (viewer debo
 // Stable per-session viewer ID (independent of selfUuid which arrives late)
 const viewerId = `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 let viewerRegistered = false;
+
+// ── Source card switching (Local / YouTube) ───────────────────────────────
+function selectSource(type: 'local' | 'youtube') {
+  cardLocal.classList.toggle('active', type === 'local');
+  cardYouTube.classList.toggle('active', type === 'youtube');
+  localPanel.style.display    = type === 'local'   ? 'flex' : 'none';
+  youtubePanel.style.display  = type === 'youtube' ? 'flex' : 'none';
+}
+cardLocal.addEventListener('click',   () => selectSource('local'));
+cardYouTube.addEventListener('click', () => selectSource('youtube'));
+
+// ── YouTube URL share ─────────────────────────────────────────────────────
+shareYoutubeBtn.addEventListener('click', async () => {
+  const url = youtubeUrlInput.value.trim();
+  const id  = getYouTubeId(url);
+  if (!id) { setStatus('Please paste a valid YouTube URL', true); return; }
+
+  const canonicalUrl = `https://www.youtube.com/watch?v=${id}`;
+
+  if (!UPLOAD_SERVER) {
+    setStatus('No upload server configured.', true); return;
+  }
+  setStatus('Sharing…');
+  shareYoutubeBtn.disabled = true;
+
+  try {
+    await fetch(`${UPLOAD_SERVER}/pending-share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ sessionId, url: canonicalUrl, sharerName: selfName }),
+    }).catch(() => undefined);
+    setStatus('');
+    startShare(canonicalUrl);
+  } catch {
+    setStatus('Failed to share.', true);
+    shareYoutubeBtn.disabled = false;
+  }
+});
 
 // ── File picker ────────────────────────────────────────────────────────────
 // No explicit click handler — the <label> natively forwards clicks to the
@@ -160,19 +212,99 @@ function startShare(url: string) {
   currentUrl = url;
   loadVideo(url, 0, false);
   showPlayer(true);
-  // Post sync-state immediately so viewers don't autoplay before sharer presses play
   postSyncState();
   startHeartbeat();
 }
 
-// ── Video player ───────────────────────────────────────────────────────────
+// ── YouTube IFrame Player ──────────────────────────────────────────────────
+type YTPlayer = {
+  playVideo(): void; pauseVideo(): void;
+  seekTo(s: number, allow: boolean): void;
+  getCurrentTime(): number; getDuration(): number;
+  getPlayerState(): number; setPlaybackRate(r: number): void;
+  destroy(): void;
+};
+let ytPlayer: YTPlayer | null = null;
+let ytApiReady = false;
+
+function loadYouTubePlayer(videoId: string, startTime: number, autoplay: boolean) {
+  videoEl.style.display = 'none'; // hide <video>, show YouTube iframe
+
+  // Inject YouTube IFrame API script once
+  if (!document.getElementById('yt-api')) {
+    const s = document.createElement('script');
+    s.id = 'yt-api'; s.src = 'https://www.youtube.com/iframe_api';
+    document.head.appendChild(s);
+  }
+
+  const container = document.createElement('div');
+  container.id = 'yt-container';
+  container.style.cssText = 'width:100%;height:100%;';
+  playerInner.innerHTML = '';
+  playerInner.appendChild(container);
+
+  const createPlayer = () => {
+    if (ytPlayer) { ytPlayer.destroy(); ytPlayer = null; }
+    ytPlayer = new (window as Record<string,unknown>).YT.Player('yt-container', {
+      videoId,
+      width: '100%', height: '100%',
+      playerVars: {
+        start: Math.floor(startTime),
+        autoplay: autoplay ? 1 : 0,
+        rel: 0, modestbranding: 1,
+        origin: window.location.origin,
+      },
+      events: {
+        onReady: () => { startSeekUpdater(); },
+        onStateChange: (e: { data: number }) => {
+          // 1 = playing, 2 = paused — post sync so viewers follow
+          if (isSharer && (e.data === 1 || e.data === 2)) postSyncState();
+        },
+      },
+    }) as unknown as YTPlayer;
+  };
+
+  if (ytApiReady) {
+    createPlayer();
+  } else {
+    (window as Record<string,unknown>).onYouTubeIframeAPIReady = () => {
+      ytApiReady = true;
+      createPlayer();
+    };
+  }
+}
+
+// Current time / duration helpers that work for both local and YouTube
+function getCurrentTime(): number {
+  if (ytPlayer) { try { return ytPlayer.getCurrentTime(); } catch { return 0; } }
+  return videoEl.currentTime;
+}
+function getDuration(): number {
+  if (ytPlayer) { try { return ytPlayer.getDuration(); } catch { return 0; } }
+  return videoEl.duration || 0;
+}
+function isPaused(): boolean {
+  if (ytPlayer) { try { return ytPlayer.getPlayerState() !== 1; } catch { return true; } }
+  return videoEl.paused;
+}
+
+// ── Video player (local files) ─────────────────────────────────────────────
 function loadVideo(url: string, startTime: number, autoplay: boolean) {
-  currentUrl          = url;
+  const ytId = getYouTubeId(url);
+  currentUrl = url;
+
+  if (ytId) {
+    loadYouTubePlayer(ytId, startTime, autoplay);
+    return;
+  }
+
+  // Local video
+  videoEl.style.display = 'block';
+  playerInner.innerHTML = '';
+  playerInner.appendChild(videoEl);
   videoEl.src         = url;
   videoEl.currentTime = startTime;
   videoEl.addEventListener('loadedmetadata', () => { startSeekUpdater(); setStatus(''); }, { once: true });
-  // Note: file is NOT deleted on natural end — only on Stop button click.
-  // This lets the sharer replay the video before deciding to close.
   videoEl.addEventListener('error', () => {
     setStatus(`Could not load video. <a href="${url}" target="_blank">Open ↗</a>`, true);
   }, { once: true });
@@ -183,11 +315,11 @@ playOverlay.addEventListener('click', () => { void tryPlay(); });
 
 // ── Sharer controls ────────────────────────────────────────────────────────
 playPauseBtn.addEventListener('click', () => {
-  if (videoEl.paused) {
-    void tryPlay();
+  if (ytPlayer) {
+    if (isPaused()) { ytPlayer.playVideo(); } else { ytPlayer.pauseVideo(); }
     postSyncState();
   } else {
-    videoEl.pause();
+    if (videoEl.paused) { void tryPlay(); } else { videoEl.pause(); }
     postSyncState();
   }
   updatePlayPause();
@@ -216,7 +348,8 @@ seekBarEl.addEventListener('input', () => {
 });
 seekBarEl.addEventListener('change', () => {
   isSeeking2 = false;
-  videoEl.currentTime = (parseFloat(seekBarEl.value) / 1000) * (videoEl.duration || 0);
+  const t = (parseFloat(seekBarEl.value) / 1000) * getDuration();
+  if (ytPlayer) { ytPlayer.seekTo(t, true); } else { videoEl.currentTime = t; }
   postSyncState();
 });
 
@@ -345,7 +478,8 @@ function deleteUploadedFile(url: string) {
 
 // ── Speed control (sharer — synced to viewers via sync-state) ────────────
 function applySpeed(speed: number) {
-  videoEl.playbackRate = speed;
+  if (ytPlayer) { try { ytPlayer.setPlaybackRate(speed); } catch {} }
+  else { videoEl.playbackRate = speed; }
   if (speedSelect) speedSelect.value = String(speed);
   postSyncState();
 }
@@ -396,7 +530,7 @@ function postSyncState() {
   fetch(`${UPLOAD_SERVER}/sync-state/${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ time: videoEl.currentTime, playing: !videoEl.paused, speed: videoEl.playbackRate }),
+    body: JSON.stringify({ time: getCurrentTime(), playing: !isPaused(), speed: ytPlayer ? 1 : videoEl.playbackRate }),
   }).catch(() => undefined);
 }
 
@@ -440,10 +574,12 @@ async function applySyncFromServer() {
     }
 
     // Sync play/pause state
-    if (data.playing && videoEl.paused) {
-      void tryPlay();
-    } else if (!data.playing && !videoEl.paused) {
-      videoEl.pause();
+    if (ytPlayer) {
+      if (data.playing && isPaused()) ytPlayer.playVideo();
+      else if (!data.playing && !isPaused()) ytPlayer.pauseVideo();
+    } else {
+      if (data.playing && videoEl.paused) { void tryPlay(); }
+      else if (!data.playing && !videoEl.paused) { videoEl.pause(); }
     }
     updatePlayPause();
   } catch { /* server unreachable */ }
@@ -454,8 +590,8 @@ function startSeekUpdater() {
   cancelAnimationFrame(seekRafId);
   const tick = () => {
     if (!isSeeking_ && !isSeeking2) {
-      const pos = videoEl.currentTime;
-      const dur = videoEl.duration || 0;
+      const pos = getCurrentTime();
+      const dur = getDuration();
       seekBarEl.value = String(dur > 0 ? Math.round((pos / dur) * 1000) : 0);
       timeDisplay.textContent = `${fmt(pos)} / ${fmt(dur)}`;
       updatePlayPause();
@@ -466,7 +602,7 @@ function startSeekUpdater() {
 }
 
 function updatePlayPause() {
-  playPauseBtn.textContent = videoEl.paused ? '▶' : '⏸';
+  playPauseBtn.textContent = isPaused() ? '▶' : '⏸';
 }
 
 // ── Heartbeat for late joiners ─────────────────────────────────────────────
