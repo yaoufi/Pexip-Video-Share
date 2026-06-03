@@ -222,6 +222,7 @@ type YTPlayer = {
   seekTo(s: number, allow: boolean): void;
   getCurrentTime(): number; getDuration(): number;
   getPlayerState(): number; setPlaybackRate(r: number): void;
+  mute(): void; unMute(): void; isMuted(): boolean; setVolume(v: number): void;
   destroy(): void;
 };
 let ytPlayer: YTPlayer | null = null;
@@ -287,6 +288,10 @@ function isPaused(): boolean {
   if (ytPlayer) { try { return ytPlayer.getPlayerState() !== 1; } catch { return true; } }
   return videoEl.paused;
 }
+function isMuted(): boolean {
+  if (ytPlayer) { try { return ytPlayer.isMuted(); } catch { return false; } }
+  return videoEl.muted || videoEl.volume === 0;
+}
 
 // ── Video player (local files) ─────────────────────────────────────────────
 function loadVideo(url: string, startTime: number, autoplay: boolean) {
@@ -332,9 +337,11 @@ pullSyncBtn.addEventListener('click', async () => {
     const res  = await fetch(`${UPLOAD_SERVER}/sync-state/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
     const data = await res.json() as { time: number; playing: boolean; speed?: number; updatedAt: number } | null;
     if (!data || !data.time) return;
-    videoEl.currentTime = data.time + (Date.now() - data.updatedAt) / 1000 * (data.speed ?? 1);
-    videoEl.playbackRate = data.speed ?? 1;
+    const snapTime = data.time + (Date.now() - data.updatedAt) / 1000 * (data.speed ?? 1);
+    if (ytPlayer) { ytPlayer.seekTo(snapTime, true); }
+    else           { videoEl.currentTime = snapTime; videoEl.playbackRate = data.speed ?? 1; }
     if (data.playing) void tryPlay();
+    else if (ytPlayer) ytPlayer.pauseVideo();
     else videoEl.pause();
   } catch { /* server unreachable */ }
 });
@@ -343,8 +350,8 @@ let isSeeking2 = false;
 seekBarEl.addEventListener('mousedown',  () => { isSeeking2 = true; });
 seekBarEl.addEventListener('touchstart', () => { isSeeking2 = true; });
 seekBarEl.addEventListener('input', () => {
-  const t = (parseFloat(seekBarEl.value) / 1000) * (videoEl.duration || 0);
-  timeDisplay.textContent = `${fmt(t)} / ${fmt(videoEl.duration || 0)}`;
+  const t = (parseFloat(seekBarEl.value) / 1000) * getDuration();
+  timeDisplay.textContent = `${fmt(t)} / ${fmt(getDuration())}`;
 });
 seekBarEl.addEventListener('change', () => {
   isSeeking2 = false;
@@ -363,7 +370,9 @@ stopBtn.addEventListener('click', () => {
   }
   stopHeartbeat();
   stopSyncPoll();
+  if (ytPlayer) { try { ytPlayer.destroy(); } catch {} ytPlayer = null; }
   videoEl.pause(); videoEl.src = '';
+  videoEl.style.display = 'block'; // restore for next local video share
   currentUrl = '';
   showForm();
 });
@@ -374,6 +383,12 @@ stopBtn.addEventListener('click', () => {
 //   2. If blocked, try muted play (always permitted on mobile) → show unmute prompt
 //   3. If even muted fails, fall back to tap-to-play overlay
 async function tryPlay(): Promise<void> {
+  // YouTube — use the player API directly (no autoplay restrictions)
+  if (ytPlayer) {
+    try { ytPlayer.playVideo(); } catch {}
+    playOverlay.style.display = 'none';
+    return;
+  }
   // Already playing — don't interrupt muted playback or hide the unmute bar
   if (!videoEl.paused) {
     playOverlay.style.display = 'none';
@@ -433,25 +448,29 @@ function toggleFullscreen() {
   const isFullscreen = !!(document.fullscreenElement || (document as Record<string,unknown>).webkitFullscreenElement);
 
   if (!isFullscreen) {
-    // Try standard fullscreen on the whole document
-    const el = document.documentElement as HTMLElement & {
-      webkitRequestFullscreen?: () => Promise<void>;
-    };
-    const req = el.requestFullscreen?.() ?? (el.webkitRequestFullscreen?.() as Promise<void> | undefined);
+    // For YouTube: try fullscreening the iframe first (works better on mobile)
+    if (ytPlayer) {
+      const ytFrame = playerInner.querySelector('iframe') as (HTMLIFrameElement & { webkitRequestFullscreen?(): void }) | null;
+      if (ytFrame) {
+        if (ytFrame.requestFullscreen) { ytFrame.requestFullscreen().catch(() => {}); return; }
+        if (ytFrame.webkitRequestFullscreen) { ytFrame.webkitRequestFullscreen(); return; }
+      }
+    }
+    // Standard fullscreen on the whole document
+    const el = document.documentElement as HTMLElement & { webkitRequestFullscreen?(): Promise<void> };
+    const req = el.requestFullscreen?.() ?? el.webkitRequestFullscreen?.();
     if (req) {
-      req.catch(() => {
-        // iOS Safari fallback — only the <video> element can go fullscreen
-        const v = videoEl as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+      (req as Promise<void>).catch(() => {
+        const v = videoEl as HTMLVideoElement & { webkitEnterFullscreen?(): void };
         v.webkitEnterFullscreen?.();
       });
     } else {
-      // No standard API — try iOS video fullscreen directly
-      const v = videoEl as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+      const v = videoEl as HTMLVideoElement & { webkitEnterFullscreen?(): void };
       v.webkitEnterFullscreen?.();
     }
   } else {
-    const doc = document as Document & { webkitExitFullscreen?: () => void };
-    (doc.exitFullscreen?.() ?? doc.webkitExitFullscreen?.());
+    const doc = document as Document & { webkitExitFullscreen?(): void };
+    doc.exitFullscreen?.(); doc.webkitExitFullscreen?.();
   }
 }
 
@@ -494,8 +513,16 @@ speedSelect?.addEventListener('change', () => {
 // applyVolume receives a 0–100 value and converts to 0–1 for the video element.
 function applyVolume(el: HTMLInputElement | null, muteEl: HTMLButtonElement | null, v100: number) {
   const v = Math.max(0, Math.min(100, Math.round(v100))) / 100;
-  videoEl.volume = v;
-  videoEl.muted  = v === 0;
+  if (ytPlayer) {
+    // YouTube player has its own volume/mute API
+    try {
+      if (v === 0) { ytPlayer.mute(); }
+      else         { ytPlayer.unMute(); ytPlayer.setVolume(Math.round(v100)); }
+    } catch {}
+  } else {
+    videoEl.volume = v;
+    videoEl.muted  = v === 0;
+  }
   if (muteEl) muteEl.textContent = v === 0 ? '🔇' : '🔊';
   if (el)     el.value           = String(Math.round(v100));
 }
@@ -513,13 +540,13 @@ if (isIOS) {
 }
 
 muteBtn?.addEventListener('click', () => {
-  applyVolume(volumeBar, muteBtn, videoEl.muted || videoEl.volume === 0 ? 100 : 0);
+  applyVolume(volumeBar, muteBtn, isMuted() ? 100 : 0);
 });
 volumeBar?.addEventListener('input',  handleVolume);
 volumeBar?.addEventListener('change', handleVolume); // fallback for mobile browsers
 
 viewerMuteBtn?.addEventListener('click', () => {
-  applyVolume(viewerVolumeBar, viewerMuteBtn, videoEl.muted || videoEl.volume === 0 ? 100 : 0);
+  applyVolume(viewerVolumeBar, viewerMuteBtn, isMuted() ? 100 : 0);
 });
 viewerVolumeBar?.addEventListener('input',  handleViewerVol);
 viewerVolumeBar?.addEventListener('change', handleViewerVol); // fallback for mobile browsers
@@ -563,13 +590,14 @@ async function applySyncFromServer() {
     const expectedTime = data.playing ? data.time + age * speed : data.time;
 
     // Only correct if meaningfully out of sync (>3 seconds drift)
-    const drift = Math.abs(videoEl.currentTime - expectedTime);
+    const drift = Math.abs(getCurrentTime() - expectedTime);
     if (drift > 3) {
-      videoEl.currentTime = expectedTime;
+      if (ytPlayer) { ytPlayer.seekTo(expectedTime, true); }
+      else           { videoEl.currentTime = expectedTime; }
     }
 
-    // Sync playback speed (sharer-controlled)
-    if (data.speed && Math.abs(data.speed - videoEl.playbackRate) > 0.01) {
+    // Sync playback speed (sharer-controlled, local video only)
+    if (!ytPlayer && data.speed && Math.abs(data.speed - videoEl.playbackRate) > 0.01) {
       videoEl.playbackRate = data.speed;
     }
 
@@ -706,6 +734,10 @@ function showPlayer(asSharer: boolean) {
   if (muteBtn)     muteBtn.style.display     = asSharer ? '' : 'none';
   if (volumeBar)   volumeBar.style.display   = asSharer ? '' : 'none';
   if (!asSharer && sharerName) sharerLabel.textContent = sharerName;
+  // YouTube has its own native fullscreen button — hide ours to avoid confusion
+  if (fullscreenBtn) fullscreenBtn.style.display = isYouTube ? 'none' : '';
+  if (viewerFsBtn)   viewerFsBtn.style.display   = isYouTube ? 'none' : '';
+  if (resizeBtn)     resizeBtn.style.display      = isYouTube ? 'none' : '';
   if (!asSharer) {
     startSyncPoll();
     registerAsViewer();
