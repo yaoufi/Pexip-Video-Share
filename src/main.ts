@@ -44,6 +44,14 @@ let activeWidget: Awaited<ReturnType<typeof plugin.ui.addWidget>> | null = null;
 let pollTimer:     ReturnType<typeof setInterval> | null = null;
 let stopPollTimer: ReturnType<typeof setInterval> | null = null;
 let isSharing = false;
+
+// Preset sizes the user can cycle through with the resize button
+const SIZE_PRESETS = [
+  { w: '480px',  h: '340px'  },   // compact
+  { w: '760px',  h: '520px'  },   // default
+  { w: '1100px', h: '700px'  },   // large
+];
+let sizeIndex = 1; // start at medium
 let currentVideo:    { url: string; sharerName: string; sessionId: string } | null = null;
 let lastOpenedUrl  = ''; // deduplication — ignores repeated video:open for the same URL
 
@@ -71,13 +79,17 @@ async function openWidget(params: Record<string, string>, title: string) {
     try { await activeWidget.remove(); } catch { /* already removed or stale */ }
     activeWidget = null;
   }
+  const { w, h } = SIZE_PRESETS[sizeIndex];
   activeWidget = await plugin.ui.addWidget({
-    src: playerUrl({ ...params, serverUrl: uploadServer, apiKey }),
+    src: playerUrl({ ...params, serverUrl: uploadServer, apiKey, sizeIndex: String(sizeIndex) }),
     type: 'floating',
     title,
     draggable: true,
     isVisible: true,
-    dimensions: { width: '760px', height: '520px' },
+    dimensions: {
+      width:  { xs: '100%', lg: w },
+      height: { xs: '100%', lg: h },
+    },
   });
 }
 
@@ -92,6 +104,30 @@ async function sendReliable(payload: Record<string, unknown>) {
     } catch { /* retry */ }
   }
 }
+
+// ── Resize signal from widget ──────────────────────────────────────────────
+// Widget writes to localStorage → storage event fires here → re-open at new size.
+window.addEventListener('storage', async (e: StorageEvent) => {
+  if (e.key !== 'vs2-resize' || !e.newValue || !currentVideo) return;
+  sizeIndex = (sizeIndex + 1) % SIZE_PRESETS.length;
+  let initTime = 0;
+  try {
+    const r = await fetch(`${uploadServer}/sync-state/${currentVideo.sessionId}`, {
+      cache: 'no-store', headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    });
+    const d = await r.json() as { time?: number; speed?: number; updatedAt?: number } | null;
+    if (d?.time) initTime = Math.max(0, d.time + (Date.now() - (d.updatedAt ?? 0)) / 1000 * (d.speed ?? 1));
+  } catch {}
+  await openWidget({
+    role: isSharing ? 'sharer' : 'viewer',
+    selfUuid, selfName,
+    url: currentVideo.url,
+    sharerName: currentVideo.sharerName,
+    sessionId: currentVideo.sessionId,
+    initTime: String(initTime),
+    initPlaying: 'false',
+  }, isSharing ? 'Video Share' : `${currentVideo.sharerName} is sharing`);
+});
 
 // ── Settings button — configure server URL ─────────────────────────────────
 const settingsBtn = await plugin.ui.addButton({
@@ -150,6 +186,9 @@ function startPolling(sessionId: string) {
         senderUuid: selfUuid,
         sessionId,
       };
+      // Track video for sharer so re-opening the widget doesn't restart the share
+      currentVideo = { url: data.url, sharerName: selfName, sessionId };
+
       // Retry up to 3 times — Pexip sometimes drops messages
       void sendReliable(payload as Record<string, unknown>);
 
@@ -195,25 +234,43 @@ const shareBtn = await plugin.ui.addButton({
 });
 
 shareBtn.onClick.add(async () => {
-  // Viewer re-opening a closed widget — but first verify the share is still active
-  if (!isSharing && currentVideo) {
+  // Re-open existing share for both sharer (minimised) and viewer (closed widget)
+  if (currentVideo) {
+    // Verify the share hasn't been stopped on the server
     try {
       const r = await fetch(`${uploadServer}/stop-signal/${currentVideo.sessionId}`, {
         cache: 'no-store',
         headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
       });
       const d = await r.json() as { stopped: boolean };
-      if (d.stopped) {
-        // Share already ended — clear stale state and fall through to sharer mode
-        currentVideo = null;
-      }
-    } catch { /* unreachable — assume still active */ }
+      if (d.stopped) { currentVideo = null; isSharing = false; }
+    } catch { /* server unreachable — assume still active */ }
 
     if (currentVideo) {
-      await openWidget(
-        { role: 'viewer', url: currentVideo.url, sharerName: currentVideo.sharerName, selfUuid, selfName, sessionId: currentVideo.sessionId },
-        `${currentVideo.sharerName} is sharing`,
-      );
+      if (isSharing) {
+        // Sharer closed/minimised — re-open at the last known playback position
+        let initTime = 0;
+        try {
+          const r = await fetch(`${uploadServer}/sync-state/${currentVideo.sessionId}`, {
+            cache: 'no-store', headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+          });
+          const d = await r.json() as { time?: number; speed?: number; updatedAt?: number } | null;
+          if (d?.time) initTime = Math.max(0, d.time + (Date.now() - (d.updatedAt ?? 0)) / 1000 * (d.speed ?? 1));
+        } catch {}
+        await openWidget(
+          { role: 'sharer', selfUuid, sharerName: selfName,
+            sessionId: currentVideo.sessionId, url: currentVideo.url,
+            initTime: String(initTime), initPlaying: 'false' },
+          'Video Share',
+        );
+      } else {
+        // Viewer re-opening
+        await openWidget(
+          { role: 'viewer', url: currentVideo.url, sharerName: currentVideo.sharerName,
+            selfUuid, selfName, sessionId: currentVideo.sessionId },
+          `${currentVideo.sharerName} is sharing`,
+        );
+      }
       return;
     }
   }
