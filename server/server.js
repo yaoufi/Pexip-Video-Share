@@ -1,7 +1,8 @@
-const express = require('express');
-const multer  = require('multer');
-const path    = require('path');
-const fs      = require('fs');
+const express    = require('express');
+const multer     = require('multer');
+const path       = require('path');
+const fs         = require('fs');
+const { execFile } = require('child_process');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 const PORT       = process.env.PORT ?? 4001;
@@ -60,8 +61,48 @@ app.use((req, res, next) => {
   next();
 });
 
+// ── MP4 fast-start optimisation ────────────────────────────────────────────
+// Moves the moov atom to the front of the file so browsers can start
+// streaming immediately without downloading the whole file first.
+// Falls back silently for non-MP4 formats (WebM, AVI, etc.).
+function fastStart(filePath) {
+  return new Promise((resolve) => {
+    const tmpPath = filePath + '.faststart.tmp';
+    const name    = require('path').basename(filePath);
+
+    execFile('ffmpeg', [
+      '-i', filePath,
+      '-c', 'copy',
+      '-movflags', 'faststart',
+      '-f', 'mp4',          // explicit format — required when output extension is not .mp4
+      '-y',
+      tmpPath
+    ], { timeout: 120_000 }, (err, _stdout, stderr) => {
+      if (err) {
+        fs.unlink(tmpPath, () => {});
+        // Log the reason so we can diagnose mobile incompatibilities
+        const reason = (stderr || err.message || '').split('\n').filter(l =>
+          l.includes('Error') || l.includes('Invalid') || l.includes('not supported')
+        ).slice(0, 2).join(' | ') || err.message;
+        console.log(`[ffmpeg] ${name} — skipped fast-start: ${reason}`);
+        resolve(false);
+      } else {
+        fs.rename(tmpPath, filePath, (e) => {
+          if (e) {
+            console.log(`[ffmpeg] ${name} — rename failed: ${e.message}`);
+            resolve(false);
+          } else {
+            console.log(`[ffmpeg] ${name} — fast-start OK`);
+            resolve(true);
+          }
+        });
+      }
+    });
+  });
+}
+
 // ── Upload endpoint ────────────────────────────────────────────────────────
-app.post('/upload', upload.array('files'), (req, res) => {
+app.post('/upload', upload.array('files'), async (req, res) => {
   if (!req.files || req.files.length === 0) {
     return res.status(400).json({ error: 'No files received.' });
   }
@@ -69,6 +110,10 @@ app.post('/upload', upload.array('files'), (req, res) => {
   // Build fully-qualified URLs, respecting X-Forwarded-* headers from a reverse proxy
   const protocol = req.headers['x-forwarded-proto'] ?? req.protocol;
   const host     = req.headers['x-forwarded-host']  ?? req.get('host');
+
+  // Optimise each file for web streaming (fast-start) before returning URLs.
+  // Runs in parallel; non-video files fail silently and keep the original.
+  await Promise.all(req.files.map(f => fastStart(f.path)));
 
   const uploaded = req.files.map((file) => {
     const url = `${protocol}://${host}/uploads/${file.filename}`;
@@ -176,8 +221,8 @@ app.get('/pending-share/:sessionId', (req, res) => {
 const syncStates = {}; // sessionId → { time, playing, updatedAt }
 
 app.post('/sync-state/:sessionId', (req, res) => {
-  const { time, playing } = req.body;
-  syncStates[req.params.sessionId] = { time, playing, updatedAt: Date.now() };
+  const { time, playing, speed } = req.body;
+  syncStates[req.params.sessionId] = { time, playing, speed: speed ?? 1, updatedAt: Date.now() };
   res.json({ ok: true });
 });
 

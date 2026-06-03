@@ -245,19 +245,31 @@ The plugin makes HTTP requests to your upload server. Pexip's Content Security P
 
 ### 3.2 Upload the branding package
 
-1. Go to **Platform → Global Settings → Branding**
-2. Click **Upload branding package**
-3. Select `videoshare2-branding.zip`
+1. Go to **Web App → Web App Branding**
+2. Click **Add Webapp branding package** (bottom of the page)
+3. Fill in the fields:
+
+| Field | Value |
+|---|---|
+| **Name** | e.g. `VideoShare2` |
+| **Description** | Optional |
+| **Web app version** | Select the applicable webapp3 version |
+| **Branding package to upload** | Select `videoshare2-branding.zip` |
+
 4. Click **Save**
 
-### 3.3 Apply the branding to a VMR
+> Allow approximately **one minute** for the package to replicate to all Conferencing Nodes before testing.
 
-1. Go to **Services → Virtual Meeting Rooms**
-2. Open the VMR you want to enable the plugin on
-3. Set **Branding package** to the uploaded package
+### 3.3 Apply the branding to a web app path
+
+Branding in Pexip is **path-based** — it applies to all participants who access meetings via a specific web app path, not to individual VMRs.
+
+1. Go to **Web App → Web App Paths**
+2. Select the path you want to apply the branding to (or create a new one)
+3. Set **Branding package** to the package you just uploaded
 4. Click **Save**
 
-> To enable the plugin on all VMRs by default, apply the branding package at the **Global Settings** level instead of per-VMR.
+> To apply the plugin to all meetings, assign the branding package to your default web app path.
 
 ---
 
@@ -376,7 +388,7 @@ cd branding-package
 zip -r ../videoshare2-branding.zip webapp3
 ```
 
-Re-upload `videoshare2-branding.zip` to Pexip management. No server changes needed unless the changelog says otherwise.
+Re-upload via **Web App → Web App Branding → Add Webapp branding package**. No server changes needed unless the changelog says otherwise.
 
 ---
 
@@ -384,7 +396,7 @@ Re-upload `videoshare2-branding.zip` to Pexip management. No server changes need
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| Toolbar button missing | Branding not applied to VMR | Apply branding package to the VMR in management |
+| Toolbar button missing | Branding not applied to the web app path | Go to **Web App → Web App Paths**, assign the branding package to the path |
 | "No branding files found" when uploading | Wrong zip structure or `meta.name` not `"DEFAULT"` | Verify `manifest.json` has `"name": "DEFAULT"` and `"brandVersion": "n/a"` |
 | Upload fails | Server not reachable or API key wrong | Check `https://your-server.com/health` returns `{"ok":true}`; verify API key in manifest matches `VS2_API_KEY` env var |
 | Remote participant doesn't see the video | CSP `connect-src` missing server domain | Add `https://your-server.com` to `connect-src` in Pexip management |

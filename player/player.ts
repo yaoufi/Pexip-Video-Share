@@ -38,6 +38,7 @@ const playerViewEl  = document.getElementById('player-view')!;
 const videoEl       = document.getElementById('video') as HTMLVideoElement;
 const playOverlay   = document.getElementById('play-overlay')!;
 const peerBadge     = document.getElementById('peer-badge')!;
+const unmuteBar     = document.getElementById('unmute-bar')!;
 const peerNameEl    = document.getElementById('peer-name')!;
 const fileDrop      = document.getElementById('file-drop')!;
 const fileInput     = document.getElementById('file-input') as HTMLInputElement;
@@ -52,11 +53,17 @@ const sharerLabel   = document.getElementById('sharer-label')!;
 const playPauseBtn  = document.getElementById('play-pause-btn')!;
 const seekBarEl     = document.getElementById('seek-bar') as HTMLInputElement;
 const timeDisplay   = document.getElementById('time-display')!;
-const pushSyncBtn   = document.getElementById('push-sync-btn')!;
+const pushSyncBtn   = document.getElementById('push-sync-btn') as HTMLButtonElement | null;
 const pullSyncBtn   = document.getElementById('pull-sync-btn')!;
-const stopBtn       = document.getElementById('stop-btn')!;
-const fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement | null;
-const viewerFsBtn   = document.getElementById('viewer-fs-btn')  as HTMLButtonElement | null;
+const stopBtn          = document.getElementById('stop-btn')!;
+const resizeBtn        = document.getElementById('resize-btn')        as HTMLButtonElement | null;
+const fullscreenBtn    = document.getElementById('fullscreen-btn')    as HTMLButtonElement | null;
+const viewerFsBtn      = document.getElementById('viewer-fs-btn')     as HTMLButtonElement | null;
+const speedSelect      = document.getElementById('speed-select')      as HTMLSelectElement | null;
+const muteBtn          = document.getElementById('mute-btn')          as HTMLButtonElement | null;
+const volumeBar        = document.getElementById('volume-bar')        as HTMLInputElement  | null;
+const viewerMuteBtn    = document.getElementById('viewer-mute-btn')   as HTMLButtonElement | null;
+const viewerVolumeBar  = document.getElementById('viewer-volume-bar') as HTMLInputElement  | null;
 
 // ── State ──────────────────────────────────────────────────────────────────
 let currentUrl    = '';
@@ -72,6 +79,9 @@ const viewerId = `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 let viewerRegistered = false;
 
 // ── File picker ────────────────────────────────────────────────────────────
+// No explicit click handler — the <label> natively forwards clicks to the
+// <input> when it contains it. The input uses opacity/position (not
+// display:none) so iOS Safari preserves the label→input association.
 fileDrop.addEventListener('dragover', e => { e.preventDefault(); fileDrop.classList.add('drag-over'); });
 fileDrop.addEventListener('dragleave', () => fileDrop.classList.remove('drag-over'));
 fileDrop.addEventListener('drop', e => {
@@ -161,24 +171,20 @@ function loadVideo(url: string, startTime: number, autoplay: boolean) {
   videoEl.src         = url;
   videoEl.currentTime = startTime;
   videoEl.addEventListener('loadedmetadata', () => { startSeekUpdater(); setStatus(''); }, { once: true });
-  videoEl.addEventListener('ended', () => { if (isSharer) deleteUploadedFile(currentUrl); }, { once: true });
+  // Note: file is NOT deleted on natural end — only on Stop button click.
+  // This lets the sharer replay the video before deciding to close.
   videoEl.addEventListener('error', () => {
     setStatus(`Could not load video. <a href="${url}" target="_blank">Open ↗</a>`, true);
   }, { once: true });
-  if (autoplay) {
-    videoEl.play().catch(() => { playOverlay.style.display = 'flex'; });
-  }
+  if (autoplay) { void tryPlay(); }
 }
 
-playOverlay.addEventListener('click', () => {
-  videoEl.play().catch(() => undefined);
-  playOverlay.style.display = 'none';
-});
+playOverlay.addEventListener('click', () => { void tryPlay(); });
 
 // ── Sharer controls ────────────────────────────────────────────────────────
 playPauseBtn.addEventListener('click', () => {
   if (videoEl.paused) {
-    videoEl.play().catch(() => undefined);
+    void tryPlay();
     postSyncState();
   } else {
     videoEl.pause();
@@ -187,8 +193,19 @@ playPauseBtn.addEventListener('click', () => {
   updatePlayPause();
 });
 
-pushSyncBtn.addEventListener('click', () => { postSyncState(); });
-pullSyncBtn.addEventListener('click', () => { applySyncFromServer(); });
+// Viewer: force-snap to sharer's position (bypasses the 3s drift threshold)
+pullSyncBtn.addEventListener('click', async () => {
+  if (!sessionId || !UPLOAD_SERVER) return;
+  try {
+    const res  = await fetch(`${UPLOAD_SERVER}/sync-state/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
+    const data = await res.json() as { time: number; playing: boolean; speed?: number; updatedAt: number } | null;
+    if (!data || !data.time) return;
+    videoEl.currentTime = data.time + (Date.now() - data.updatedAt) / 1000 * (data.speed ?? 1);
+    videoEl.playbackRate = data.speed ?? 1;
+    if (data.playing) void tryPlay();
+    else videoEl.pause();
+  } catch { /* server unreachable */ }
+});
 
 let isSeeking2 = false;
 seekBarEl.addEventListener('mousedown',  () => { isSeeking2 = true; });
@@ -218,15 +235,90 @@ stopBtn.addEventListener('click', () => {
   showForm();
 });
 
+// ── Autoplay helper ────────────────────────────────────────────────────────
+// Mobile browsers block autoplay with sound. Strategy:
+//   1. Try normal play (works on desktop and after a user gesture)
+//   2. If blocked, try muted play (always permitted on mobile) → show unmute prompt
+//   3. If even muted fails, fall back to tap-to-play overlay
+async function tryPlay(): Promise<void> {
+  // Already playing — don't interrupt muted playback or hide the unmute bar
+  if (!videoEl.paused) {
+    playOverlay.style.display = 'none';
+    return;
+  }
+  try {
+    await videoEl.play();
+    // Unmuted play succeeded — only hide the bar if we're not muted
+    if (!videoEl.muted) unmuteBar.style.display = 'none';
+    playOverlay.style.display = 'none';
+  } catch {
+    // Play blocked (browser autoplay policy) — try muted
+    try {
+      videoEl.muted = true;
+      await videoEl.play();
+      // Muted play worked — show unmute prompt instead of blocking overlay
+      unmuteBar.style.display = 'block';
+      unmuteBar.onclick = () => {
+        videoEl.muted = false;
+        unmuteBar.style.display = 'none';
+        if (viewerVolumeBar) viewerVolumeBar.value = '100';
+        if (viewerMuteBtn)   viewerMuteBtn.textContent = '🔊';
+        if (volumeBar)       volumeBar.value = '100';
+        if (muteBtn)         muteBtn.textContent = '🔊';
+      };
+    } catch {
+      // Completely blocked — show tap-to-play overlay as last resort
+      videoEl.muted = false;
+      playOverlay.style.display = 'flex';
+    }
+  }
+}
+
+// ── Resize button — cycles through size presets ────────────────────────────
+// Writes to localStorage → storage event fires in main.ts → widget re-created at new size.
+const SIZE_LABELS = ['⊡ Small', '⊞ Medium', '⊟ Large'];
+const sizeIndexParam = parseInt(params.get('sizeIndex') ?? '1', 10);
+if (resizeBtn) resizeBtn.title = `Resize — currently ${SIZE_LABELS[sizeIndexParam] ?? 'Medium'}\nClick to cycle sizes`;
+
+resizeBtn?.addEventListener('click', () => {
+  try {
+    localStorage.setItem('vs2-resize', String(Date.now())); // value change triggers storage event
+  } catch { /* sandboxed */ }
+});
+
+// ── Narrow layout detection ────────────────────────────────────────────────
+// CSS media queries are unreliable inside Pexip widget iframes (the iframe
+// may have a fixed width regardless of screen size). Use JS instead.
+function updateLayout() {
+  document.body.classList.toggle('narrow', window.innerWidth < 540);
+}
+updateLayout();
+window.addEventListener('resize', updateLayout);
+
 // ── Fullscreen ─────────────────────────────────────────────────────────────
 function toggleFullscreen() {
-  if (!document.fullscreenElement) {
-    document.documentElement.requestFullscreen().catch(() => {
-      // Fallback: try the video element directly
-      videoEl.requestFullscreen().catch(() => undefined);
-    });
+  const isFullscreen = !!(document.fullscreenElement || (document as Record<string,unknown>).webkitFullscreenElement);
+
+  if (!isFullscreen) {
+    // Try standard fullscreen on the whole document
+    const el = document.documentElement as HTMLElement & {
+      webkitRequestFullscreen?: () => Promise<void>;
+    };
+    const req = el.requestFullscreen?.() ?? (el.webkitRequestFullscreen?.() as Promise<void> | undefined);
+    if (req) {
+      req.catch(() => {
+        // iOS Safari fallback — only the <video> element can go fullscreen
+        const v = videoEl as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+        v.webkitEnterFullscreen?.();
+      });
+    } else {
+      // No standard API — try iOS video fullscreen directly
+      const v = videoEl as HTMLVideoElement & { webkitEnterFullscreen?: () => void };
+      v.webkitEnterFullscreen?.();
+    }
   } else {
-    document.exitFullscreen().catch(() => undefined);
+    const doc = document as Document & { webkitExitFullscreen?: () => void };
+    (doc.exitFullscreen?.() ?? doc.webkitExitFullscreen?.());
   }
 }
 
@@ -236,11 +328,14 @@ viewerFsBtn?.addEventListener('click', toggleFullscreen);
 // Double-click on video also toggles fullscreen (common UX pattern)
 videoEl.addEventListener('dblclick', toggleFullscreen);
 
-document.addEventListener('fullscreenchange', () => {
-  const icon = document.fullscreenElement ? '⊡' : '⛶';
+const onFsChange = () => {
+  const isFs = !!(document.fullscreenElement || (document as Record<string,unknown>).webkitFullscreenElement);
+  const icon = isFs ? '⊡' : '⛶';
   if (fullscreenBtn) fullscreenBtn.textContent = icon;
   if (viewerFsBtn)   viewerFsBtn.textContent   = icon;
-});
+};
+document.addEventListener('fullscreenchange',       onFsChange);
+document.addEventListener('webkitfullscreenchange', onFsChange);
 
 // Delete the uploaded file once sharing ends (Stop button or video ended)
 function deleteUploadedFile(url: string) {
@@ -248,13 +343,60 @@ function deleteUploadedFile(url: string) {
   fetch(url, { method: 'DELETE', headers: authHeaders() }).catch(() => undefined);
 }
 
+// ── Speed control (sharer — synced to viewers via sync-state) ────────────
+function applySpeed(speed: number) {
+  videoEl.playbackRate = speed;
+  if (speedSelect) speedSelect.value = String(speed);
+  postSyncState();
+}
+
+speedSelect?.addEventListener('change', () => {
+  if (!speedSelect) return;
+  applySpeed(parseFloat(speedSelect.value));
+});
+
+// ── Volume control (local only — each participant sets their own) ─────────
+// Volume sliders use 0–100 integer range (decimal steps are unreliable on mobile).
+// applyVolume receives a 0–100 value and converts to 0–1 for the video element.
+function applyVolume(el: HTMLInputElement | null, muteEl: HTMLButtonElement | null, v100: number) {
+  const v = Math.max(0, Math.min(100, Math.round(v100))) / 100;
+  videoEl.volume = v;
+  videoEl.muted  = v === 0;
+  if (muteEl) muteEl.textContent = v === 0 ? '🔇' : '🔊';
+  if (el)     el.value           = String(Math.round(v100));
+}
+
+const handleVolume     = () => { if (volumeBar)      applyVolume(volumeBar,      muteBtn,      parseFloat(volumeBar.value));      };
+const handleViewerVol  = () => { if (viewerVolumeBar) applyVolume(viewerVolumeBar, viewerMuteBtn, parseFloat(viewerVolumeBar.value)); };
+
+// iOS Safari does not allow programmatic volume control — videoEl.volume is read-only.
+// Hide the slider so we don't show a non-functional control; mute button still works.
+const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+              (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+if (isIOS) {
+  if (volumeBar)       volumeBar.style.display       = 'none';
+  if (viewerVolumeBar) viewerVolumeBar.style.display  = 'none';
+}
+
+muteBtn?.addEventListener('click', () => {
+  applyVolume(volumeBar, muteBtn, videoEl.muted || videoEl.volume === 0 ? 100 : 0);
+});
+volumeBar?.addEventListener('input',  handleVolume);
+volumeBar?.addEventListener('change', handleVolume); // fallback for mobile browsers
+
+viewerMuteBtn?.addEventListener('click', () => {
+  applyVolume(viewerVolumeBar, viewerMuteBtn, videoEl.muted || videoEl.volume === 0 ? 100 : 0);
+});
+viewerVolumeBar?.addEventListener('input',  handleViewerVol);
+viewerVolumeBar?.addEventListener('change', handleViewerVol); // fallback for mobile browsers
+
 // ── Post sync state to server (sharer → server → viewer poll) ─────────────
 function postSyncState() {
   if (!sessionId) return;
   fetch(`${UPLOAD_SERVER}/sync-state/${sessionId}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ time: videoEl.currentTime, playing: !videoEl.paused }),
+    body: JSON.stringify({ time: videoEl.currentTime, playing: !videoEl.paused, speed: videoEl.playbackRate }),
   }).catch(() => undefined);
 }
 
@@ -272,7 +414,7 @@ async function applySyncFromServer() {
   if (!sessionId) return;
   try {
     const res  = await fetch(`${UPLOAD_SERVER}/sync-state/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
-    const data = await res.json() as { time: number; playing: boolean; updatedAt: number } | null;
+    const data = await res.json() as { time: number; playing: boolean; speed?: number; updatedAt: number } | null;
     if (!data) return;
     // Sharer disconnect detection — no sync update for >30 s means they stopped sharing
     const age = (Date.now() - data.updatedAt) / 1000;
@@ -281,10 +423,10 @@ async function applySyncFromServer() {
       return;
     }
 
-    // Project the sharer's position forward by how long ago the state was saved.
-    // Without this, a 10s-old heartbeat at time=90 would make the viewer seek
-    // back from 100 to 90 every poll cycle — creating a loop.
-    const expectedTime = data.playing ? data.time + age : data.time;
+    // Project the sharer's position forward, accounting for playback speed.
+    // e.g. at 2× speed, 5 seconds of wall-clock time = 10 seconds of video.
+    const speed = data.speed ?? 1;
+    const expectedTime = data.playing ? data.time + age * speed : data.time;
 
     // Only correct if meaningfully out of sync (>3 seconds drift)
     const drift = Math.abs(videoEl.currentTime - expectedTime);
@@ -292,9 +434,14 @@ async function applySyncFromServer() {
       videoEl.currentTime = expectedTime;
     }
 
+    // Sync playback speed (sharer-controlled)
+    if (data.speed && Math.abs(data.speed - videoEl.playbackRate) > 0.01) {
+      videoEl.playbackRate = data.speed;
+    }
+
     // Sync play/pause state
     if (data.playing && videoEl.paused) {
-      videoEl.play().catch(() => { playOverlay.style.display = 'flex'; });
+      void tryPlay();
     } else if (!data.playing && !videoEl.paused) {
       videoEl.pause();
     }
@@ -417,8 +564,11 @@ function showPlayer(asSharer: boolean) {
   playerViewEl.style.display = 'flex';
   controlsEl.style.display   = asSharer ? 'flex' : 'none';
   viewerBar.style.display    = asSharer ? 'none'  : 'block';
-  pushSyncBtn.style.display  = asSharer ? ''      : 'none';
-  pullSyncBtn.style.display  = asSharer ? ''      : 'none';
+  if (pushSyncBtn) pushSyncBtn.style.display = 'none'; // removed — seek bar already syncs
+  pullSyncBtn.style.display  = asSharer ? 'none' : ''; // viewer only (in viewer bar)
+  if (speedSelect) speedSelect.style.display = asSharer ? '' : 'none';
+  if (muteBtn)     muteBtn.style.display     = asSharer ? '' : 'none';
+  if (volumeBar)   volumeBar.style.display   = asSharer ? '' : 'none';
   if (!asSharer && sharerName) sharerLabel.textContent = sharerName;
   if (!asSharer) {
     startSyncPoll();
@@ -444,8 +594,14 @@ function fmt(s: number): string {
 }
 
 // ── Initial render ─────────────────────────────────────────────────────────
-if (isSharer) {
+if (isSharer && !initialUrl) {
+  // Fresh share — show the upload form
   showForm();
+} else if (isSharer && initialUrl) {
+  // Sharer re-opened after minimising — resume video and restart heartbeat
+  loadVideo(initialUrl, initTime, false);
+  showPlayer(true);
+  startHeartbeat();
 } else if (initialUrl) {
   loadVideo(initialUrl, initTime, initPlaying);
   showPlayer(false);
