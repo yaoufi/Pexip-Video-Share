@@ -26,9 +26,10 @@ let selfUuid = params.get('selfUuid') ?? '';
 // Widget's own me event is unreliable — don't rely on it for the name.
 let selfName  = isSharer ? sharerName : (params.get('selfName') || 'Viewer');
 
-plugin.events.me.add((me: unknown) => {
-  const p = me as Record<string, string>;
-  selfUuid = p.uuid ?? selfUuid;
+plugin.events.me.add((event: unknown) => {
+  const e = event as { participant?: Record<string, string> };
+  const p = e.participant ?? (event as Record<string, string>);
+  selfUuid = p.uuid        ?? selfUuid;
   selfName  = p.displayName ?? p.name ?? selfName;
 });
 
@@ -70,7 +71,6 @@ const localPanel       = document.getElementById('local-panel')!;
 const youtubePanel     = document.getElementById('youtube-panel')!;
 const youtubeUrlInput  = document.getElementById('youtube-url-input') as HTMLInputElement;
 const shareYoutubeBtn  = document.getElementById('share-youtube-btn') as HTMLButtonElement;
-const resizeBtn        = document.getElementById('resize-btn')        as HTMLButtonElement | null;
 const fullscreenBtn    = document.getElementById('fullscreen-btn')    as HTMLButtonElement | null;
 const viewerFsBtn      = document.getElementById('viewer-fs-btn')     as HTMLButtonElement | null;
 const speedSelect      = document.getElementById('speed-select')      as HTMLSelectElement | null;
@@ -455,18 +455,6 @@ async function tryPlay(): Promise<void> {
     }
   }
 }
-
-// ── Resize button — cycles through size presets ────────────────────────────
-// Writes to localStorage → storage event fires in main.ts → widget re-created at new size.
-const SIZE_LABELS = ['⊡ Small', '⊞ Medium', '⊟ Large'];
-const sizeIndexParam = parseInt(params.get('sizeIndex') ?? '1', 10);
-if (resizeBtn) resizeBtn.title = `Resize — currently ${SIZE_LABELS[sizeIndexParam] ?? 'Medium'}\nClick to cycle sizes`;
-
-resizeBtn?.addEventListener('click', () => {
-  try {
-    localStorage.setItem('vs2-resize', String(Date.now())); // value change triggers storage event
-  } catch { /* sandboxed */ }
-});
 
 // ── Narrow layout detection ────────────────────────────────────────────────
 // CSS media queries are unreliable inside Pexip widget iframes (the iframe
@@ -1059,7 +1047,6 @@ function showPlayer(asSharer: boolean) {
   // YouTube has its own native fullscreen button — hide ours to avoid confusion
   if (fullscreenBtn) fullscreenBtn.style.display = isYouTube ? 'none' : '';
   if (viewerFsBtn)   viewerFsBtn.style.display   = isYouTube ? 'none' : '';
-  if (resizeBtn)     resizeBtn.style.display      = isYouTube ? 'none' : '';
   if (!asSharer) {
     startSyncPoll();
     registerAsViewer();

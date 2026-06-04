@@ -362,7 +362,6 @@
     body.narrow .vol-slider      { flex: 1; max-width: 220px; height: 28px; }
 
     /* Bigger tap targets on mobile */
-    body.narrow #resize-btn     { display: none; } /* widget already full-screen on mobile */
     body.narrow #fullscreen-btn,
     body.narrow #viewer-fs-btn { font-size: 20px; min-width: 44px; height: 40px; }
 
@@ -514,7 +513,6 @@
         <button class="ctrl-btn" id="mute-btn" title="Mute / Unmute">🔊</button>
         <input type="range" class="vol-slider" id="volume-bar" min="0" max="100" step="1" value="100" title="Volume" />
       </div>
-      <button class="ctrl-btn" id="resize-btn"    title="Resize window" style="font-size:14px;">⤢</button>
       <button class="ctrl-btn" id="fullscreen-btn" title="Toggle fullscreen">⛶</button>
       <span id="viewer-presence" title="Participants watching">
         👁 <span id="viewer-count">0</span>

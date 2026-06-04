@@ -45,13 +45,6 @@ let pollTimer:     ReturnType<typeof setInterval> | null = null;
 let stopPollTimer: ReturnType<typeof setInterval> | null = null;
 let isSharing = false;
 
-// Preset sizes the user can cycle through with the resize button
-const SIZE_PRESETS = [
-  { w: '480px',  h: '340px'  },   // compact
-  { w: '760px',  h: '520px'  },   // default
-  { w: '1100px', h: '700px'  },   // large
-];
-let sizeIndex = 1; // start at medium
 let currentVideo:    { url: string; sharerName: string; sessionId: string } | null = null;
 let lastOpenedUrl  = ''; // deduplication — ignores repeated video:open for the same URL
 
@@ -79,16 +72,15 @@ async function openWidget(params: Record<string, string>, title: string) {
     try { await activeWidget.remove(); } catch { /* already removed or stale */ }
     activeWidget = null;
   }
-  const { w, h } = SIZE_PRESETS[sizeIndex];
   activeWidget = await plugin.ui.addWidget({
-    src: playerUrl({ ...params, serverUrl: uploadServer, apiKey, sizeIndex: String(sizeIndex) }),
+    src: playerUrl({ ...params, serverUrl: uploadServer, apiKey }),
     type: 'floating',
     title,
     draggable: true,
     isVisible: true,
     dimensions: {
-      width:  { xs: '100%', lg: w },
-      height: { xs: '100%', lg: h },
+      width:  { xs: '100%', lg: '760px' },
+      height: { xs: '100%', lg: '520px' },
     },
   });
 }
@@ -104,30 +96,6 @@ async function sendReliable(payload: Record<string, unknown>) {
     } catch { /* retry */ }
   }
 }
-
-// ── Resize signal from widget ──────────────────────────────────────────────
-// Widget writes to localStorage → storage event fires here → re-open at new size.
-window.addEventListener('storage', async (e: StorageEvent) => {
-  if (e.key !== 'vs2-resize' || !e.newValue || !currentVideo) return;
-  sizeIndex = (sizeIndex + 1) % SIZE_PRESETS.length;
-  let initTime = 0;
-  try {
-    const r = await fetch(`${uploadServer}/sync-state/${currentVideo.sessionId}`, {
-      cache: 'no-store', headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-    });
-    const d = await r.json() as { time?: number; speed?: number; updatedAt?: number } | null;
-    if (d?.time) initTime = Math.max(0, d.time + (Date.now() - (d.updatedAt ?? 0)) / 1000 * (d.speed ?? 1));
-  } catch {}
-  await openWidget({
-    role: isSharing ? 'sharer' : 'viewer',
-    selfUuid, selfName,
-    url: currentVideo.url,
-    sharerName: currentVideo.sharerName,
-    sessionId: currentVideo.sessionId,
-    initTime: String(initTime),
-    initPlaying: 'false',
-  }, isSharing ? 'Video Share' : `${currentVideo.sharerName} is sharing`);
-});
 
 // ── Settings button — configure server URL ─────────────────────────────────
 const settingsBtn = await plugin.ui.addButton({
