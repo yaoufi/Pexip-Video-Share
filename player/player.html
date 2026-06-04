@@ -409,7 +409,17 @@
     /* Narrow — draw row goes full-width below other controls */
     body.narrow #draw-btn       { order: 2; }
     body.narrow #clear-draw-btn { order: 2; }
+    body.narrow #undo-draw-btn  { order: 2; }
+    body.narrow #laser-btn      { order: 2; }
     body.narrow #color-swatches { order: 4; flex: 0 0 100%; justify-content: center; }
+
+    /* ─── Laser canvas (above annotation canvas, never interactive) ─────── */
+    #laser-canvas {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      z-index: 6;
+      pointer-events: none;
+    }
   </style>
 </head>
 <body>
@@ -481,8 +491,10 @@
         <span id="peer-name">viewer</span> is watching
       </div>
 
-      <!-- Annotation canvas — floats above video, activated by draw mode -->
+      <!-- Annotation canvas — floats above video, activated by draw/laser mode -->
       <canvas id="draw-canvas"></canvas>
+      <!-- Laser canvas — always on top, never interactive -->
+      <canvas id="laser-canvas"></canvas>
     </div>
 
     <!-- Sharer controls -->
@@ -509,7 +521,8 @@
       </span>
       <!-- hidden pill buttons kept for JS refs -->
       <button class="pill-btn" id="push-sync-btn" style="display:none">⇾</button>
-      <!-- Draw controls -->
+      <!-- Draw / laser / undo controls -->
+      <button class="ctrl-btn" id="laser-btn" title="Laser pointer">◎</button>
       <button class="ctrl-btn" id="draw-btn" title="Toggle draw mode">🖊</button>
       <div class="color-swatches" id="color-swatches">
         <button class="color-swatch active" data-color="#ff4444" style="background:#ff4444" title="Red"></button>
@@ -517,6 +530,7 @@
         <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="White"></button>
         <button class="color-swatch" data-color="#44bbff" style="background:#44bbff" title="Blue"></button>
       </div>
+      <button class="ctrl-btn" id="undo-draw-btn" title="Undo last stroke (Ctrl+Z)" style="display:none">↩</button>
       <button class="ctrl-btn" id="clear-draw-btn" title="Clear all drawings" style="display:none">🗑</button>
       <button class="btn btn-danger" id="stop-btn">■ Stop</button>
     </div>
@@ -530,7 +544,8 @@
         <input type="range" class="vol-slider" id="viewer-volume-bar" min="0" max="100" step="1" value="100" title="Volume" />
       </div>
       <button class="ctrl-btn" id="viewer-fs-btn" title="Toggle fullscreen">⛶</button>
-      <!-- Viewer draw controls -->
+      <!-- Viewer draw / laser / undo controls -->
+      <button class="pill-btn" id="viewer-laser-btn" title="Laser pointer">◎ Laser</button>
       <button class="pill-btn" id="viewer-draw-btn" title="Toggle draw mode">🖊 Draw</button>
       <div class="color-swatches" id="viewer-color-swatches">
         <button class="color-swatch active" data-color="#ff4444" style="background:#ff4444" title="Red"></button>
@@ -538,6 +553,7 @@
         <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="White"></button>
         <button class="color-swatch" data-color="#44bbff" style="background:#44bbff" title="Blue"></button>
       </div>
+      <button class="pill-btn" id="viewer-undo-draw-btn" title="Undo last stroke (Ctrl+Z)" style="display:none">↩ Undo</button>
       <button class="pill-btn" id="viewer-clear-draw-btn" title="Clear all drawings" style="display:none">🗑 Clear</button>
     </div>
   </div>
