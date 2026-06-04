@@ -80,13 +80,18 @@ const viewerMuteBtn    = document.getElementById('viewer-mute-btn')   as HTMLBut
 const viewerVolumeBar  = document.getElementById('viewer-volume-bar') as HTMLInputElement  | null;
 
 // Draw overlay
-const drawCanvas         = document.getElementById('draw-canvas')          as HTMLCanvasElement;
-const drawBtn            = document.getElementById('draw-btn')             as HTMLButtonElement | null;
-const colorSwatchesEl    = document.getElementById('color-swatches')!;
-const clearDrawBtn       = document.getElementById('clear-draw-btn')       as HTMLButtonElement | null;
-const viewerDrawBtn      = document.getElementById('viewer-draw-btn')      as HTMLButtonElement | null;
+const drawCanvas          = document.getElementById('draw-canvas')           as HTMLCanvasElement;
+const laserCanvas         = document.getElementById('laser-canvas')          as HTMLCanvasElement;
+const drawBtn             = document.getElementById('draw-btn')              as HTMLButtonElement | null;
+const laserBtn            = document.getElementById('laser-btn')             as HTMLButtonElement | null;
+const colorSwatchesEl     = document.getElementById('color-swatches')!;
+const clearDrawBtn        = document.getElementById('clear-draw-btn')        as HTMLButtonElement | null;
+const undoDrawBtn         = document.getElementById('undo-draw-btn')         as HTMLButtonElement | null;
+const viewerDrawBtn       = document.getElementById('viewer-draw-btn')       as HTMLButtonElement | null;
+const viewerLaserBtn      = document.getElementById('viewer-laser-btn')      as HTMLButtonElement | null;
 const viewerColorSwatches = document.getElementById('viewer-color-swatches')!;
 const viewerClearDrawBtn  = document.getElementById('viewer-clear-draw-btn') as HTMLButtonElement | null;
+const viewerUndoBtn       = document.getElementById('viewer-undo-draw-btn')  as HTMLButtonElement | null;
 
 // ── State ──────────────────────────────────────────────────────────────────
 let currentUrl    = '';
@@ -101,14 +106,18 @@ let lastSyncAt    = 0;   // timestamp of last sync-state we applied (viewer debo
 const viewerId = `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 let viewerRegistered = false;
 
-// ── Draw state ─────────────────────────────────────────────────────────────
+// ── Draw / laser state ─────────────────────────────────────────────────────
 let drawMode     = false;
+let laserMode    = false;
 let drawColor    = '#ff4444';
 let isDrawing    = false;
 let currentStroke: { x: number; y: number }[] = [];
 let annoStrokes:   { id: string; points: { x: number; y: number }[]; color: string; width: number }[] = [];
-let annoCount    = 0;   // stroke count at last redraw — used to skip no-op redraws
-let annoPollTimer: ReturnType<typeof setInterval> | null = null;
+let annoCount    = 0;
+let annoPollTimer:  ReturnType<typeof setInterval> | null = null;
+let laserPollTimer: ReturnType<typeof setInterval> | null = null;
+let lastLaserPost = 0;
+const myStrokeIds: string[] = []; // IDs of strokes drawn by this participant (for undo)
 
 // ── Source card switching (Local / YouTube) ───────────────────────────────
 function selectSource(type: 'local' | 'youtube') {
@@ -389,10 +398,12 @@ stopBtn.addEventListener('click', () => {
   stopHeartbeat();
   stopSyncPoll();
   stopAnnoPoll();
-  annoStrokes = []; annoCount = 0;
+  stopLaserPoll();
+  annoStrokes = []; annoCount = 0; myStrokeIds.length = 0;
   const ctx = drawCanvas.getContext('2d');
   if (ctx) ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-  if (drawMode) toggleDrawMode(); // reset draw mode for next share
+  if (drawMode)  setDrawMode(false);
+  if (laserMode) setLaserMode(false);
   if (ytPlayer) { try { ytPlayer.destroy(); } catch {} ytPlayer = null; }
   videoEl.pause(); videoEl.src = '';
   videoEl.style.display = 'block'; // restore for next local video share
@@ -592,6 +603,7 @@ function startSyncPoll() {
 function stopSyncPoll() {
   if (syncPollTimer) { clearInterval(syncPollTimer); syncPollTimer = null; }
   stopAnnoPoll();
+  stopLaserPoll();
   unregisterAsViewer();
 }
 
@@ -705,13 +717,13 @@ plugin.events.applicationMessage.add((event: unknown) => {
   }
 });
 
-// ── Annotation drawing ─────────────────────────────────────────────────────
+// ── Annotation drawing + laser pointer ────────────────────────────────────
 
 function resizeCanvas() {
   const rect = drawCanvas.getBoundingClientRect();
   if (rect.width === 0) return;
-  drawCanvas.width  = rect.width;
-  drawCanvas.height = rect.height;
+  drawCanvas.width  = rect.width;  laserCanvas.width  = rect.width;
+  drawCanvas.height = rect.height; laserCanvas.height = rect.height;
   redrawAnnotations();
 }
 
@@ -741,6 +753,120 @@ function redrawAnnotations() {
   }
 }
 
+// ── Laser rendering ────────────────────────────────────────────────────────
+type LaserDot = { id: string; x: number; y: number; name: string; color: string };
+
+function drawLasers(lasers: LaserDot[]) {
+  const ctx = laserCanvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, laserCanvas.width, laserCanvas.height);
+  for (const dot of lasers) {
+    const px = dot.x * laserCanvas.width;
+    const py = dot.y * laserCanvas.height;
+    // Outer glow
+    ctx.beginPath();
+    ctx.arc(px, py, 14, 0, Math.PI * 2);
+    ctx.fillStyle = dot.color + '33';
+    ctx.fill();
+    // Inner dot
+    ctx.beginPath();
+    ctx.arc(px, py, 6, 0, Math.PI * 2);
+    ctx.fillStyle = dot.color;
+    ctx.shadowColor = dot.color;
+    ctx.shadowBlur  = 8;
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    // Name label
+    ctx.font = 'bold 11px sans-serif';
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)';
+    ctx.lineWidth   = 3;
+    ctx.strokeText(dot.name, px + 12, py - 6);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(dot.name, px + 12, py - 6);
+  }
+}
+
+function postLaserPosition(x: number, y: number) {
+  if (!sessionId || !UPLOAD_SERVER) return;
+  const now = Date.now();
+  if (now - lastLaserPost < 80) return; // throttle to ~12 fps
+  lastLaserPost = now;
+  fetch(`${UPLOAD_SERVER}/laser/${sessionId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ userId: viewerId, x, y, name: selfName, color: drawColor }),
+  }).catch(() => undefined);
+}
+
+function startLaserPoll() {
+  if (laserPollTimer) return;
+  laserPollTimer = setInterval(async () => {
+    if (!sessionId || !UPLOAD_SERVER) return;
+    try {
+      const res  = await fetch(`${UPLOAD_SERVER}/laser/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
+      const data = await res.json() as { lasers: LaserDot[] };
+      drawLasers(data.lasers);
+    } catch { /* server unreachable */ }
+  }, 150);
+}
+
+function stopLaserPoll() {
+  if (laserPollTimer) { clearInterval(laserPollTimer); laserPollTimer = null; }
+  const ctx = laserCanvas.getContext('2d');
+  if (ctx) ctx.clearRect(0, 0, laserCanvas.width, laserCanvas.height);
+}
+
+// ── Canvas interaction state helpers ──────────────────────────────────────
+function updateCanvasState() {
+  const needsInput = drawMode || laserMode;
+  drawCanvas.classList.toggle('active', needsInput);
+  drawCanvas.style.cursor = laserMode ? 'none' : '';
+}
+
+function setDrawMode(on: boolean) {
+  drawMode = on;
+  updateCanvasState();
+  colorSwatchesEl.classList.toggle('visible', on);
+  viewerColorSwatches.classList.toggle('visible', on);
+  if (clearDrawBtn)       clearDrawBtn.style.display       = on ? '' : 'none';
+  if (viewerClearDrawBtn) viewerClearDrawBtn.style.display  = on ? '' : 'none';
+  drawBtn?.classList.toggle('draw-active', on);
+  viewerDrawBtn?.classList.toggle('draw-active', on);
+  if (!on) redrawAnnotations();
+}
+
+function setLaserMode(on: boolean) {
+  laserMode = on;
+  updateCanvasState();
+  laserBtn?.classList.toggle('draw-active', on);
+  viewerLaserBtn?.classList.toggle('draw-active', on);
+}
+
+function toggleDrawMode()  { if (laserMode) setLaserMode(false);  setDrawMode(!drawMode);   }
+function toggleLaserMode() { if (drawMode)  setDrawMode(false);   setLaserMode(!laserMode); }
+
+// ── Undo ───────────────────────────────────────────────────────────────────
+function updateUndoBtn() {
+  const show = myStrokeIds.length > 0;
+  if (undoDrawBtn)  undoDrawBtn.style.display  = show ? '' : 'none';
+  if (viewerUndoBtn) viewerUndoBtn.style.display = show ? '' : 'none';
+}
+
+async function undoLastStroke() {
+  if (myStrokeIds.length === 0) return;
+  const id = myStrokeIds.pop()!;
+  annoStrokes = annoStrokes.filter(s => s.id !== id);
+  annoCount   = annoStrokes.length;
+  redrawAnnotations();
+  updateUndoBtn();
+  if (sessionId && UPLOAD_SERVER) {
+    fetch(`${UPLOAD_SERVER}/annotations/${sessionId}/${id}`, {
+      method: 'DELETE', headers: authHeaders(),
+    }).catch(() => undefined);
+  }
+}
+
+// ── Canvas pointer events ──────────────────────────────────────────────────
 function onDrawStart(e: MouseEvent | TouchEvent) {
   if (!drawMode) return;
   e.preventDefault();
@@ -750,21 +876,30 @@ function onDrawStart(e: MouseEvent | TouchEvent) {
 }
 
 function onDrawMove(e: MouseEvent | TouchEvent) {
-  if (!drawMode || !isDrawing) return;
-  e.preventDefault();
-  const pos = 'touches' in e ? getCanvasPos(e.touches[0]) : getCanvasPos(e);
-  currentStroke.push(pos);
-  const ctx = drawCanvas.getContext('2d');
-  if (!ctx || currentStroke.length < 2) return;
-  const prev = currentStroke[currentStroke.length - 2];
-  ctx.beginPath();
-  ctx.strokeStyle = drawColor;
-  ctx.lineWidth   = Math.max(2, 3 * drawCanvas.width / 800);
-  ctx.lineCap     = 'round';
-  ctx.lineJoin    = 'round';
-  ctx.moveTo(prev.x * drawCanvas.width, prev.y * drawCanvas.height);
-  ctx.lineTo(pos.x  * drawCanvas.width, pos.y  * drawCanvas.height);
-  ctx.stroke();
+  if (!drawMode && !laserMode) return;
+  const isTouch = 'touches' in e;
+  const pos = isTouch ? getCanvasPos((e as TouchEvent).touches[0]) : getCanvasPos(e as MouseEvent);
+
+  if (laserMode) {
+    e.preventDefault();
+    postLaserPosition(pos.x, pos.y);
+  }
+
+  if (drawMode && isDrawing) {
+    e.preventDefault();
+    currentStroke.push(pos);
+    const ctx = drawCanvas.getContext('2d');
+    if (!ctx || currentStroke.length < 2) return;
+    const prev = currentStroke[currentStroke.length - 2];
+    ctx.beginPath();
+    ctx.strokeStyle = drawColor;
+    ctx.lineWidth   = Math.max(2, 3 * drawCanvas.width / 800);
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    ctx.moveTo(prev.x * drawCanvas.width, prev.y * drawCanvas.height);
+    ctx.lineTo(pos.x  * drawCanvas.width, pos.y  * drawCanvas.height);
+    ctx.stroke();
+  }
 }
 
 async function onDrawEnd() {
@@ -780,6 +915,8 @@ async function onDrawEnd() {
   currentStroke = [];
   annoStrokes.push(stroke);
   annoCount = annoStrokes.length;
+  myStrokeIds.push(stroke.id);
+  updateUndoBtn();
   if (sessionId && UPLOAD_SERVER) {
     fetch(`${UPLOAD_SERVER}/annotations/${sessionId}`, {
       method: 'POST',
@@ -789,21 +926,11 @@ async function onDrawEnd() {
   }
 }
 
-function toggleDrawMode() {
-  drawMode = !drawMode;
-  drawCanvas.classList.toggle('active', drawMode);
-  colorSwatchesEl.classList.toggle('visible', drawMode);
-  viewerColorSwatches.classList.toggle('visible', drawMode);
-  if (clearDrawBtn)      clearDrawBtn.style.display      = drawMode ? '' : 'none';
-  if (viewerClearDrawBtn) viewerClearDrawBtn.style.display = drawMode ? '' : 'none';
-  drawBtn?.classList.toggle('draw-active', drawMode);
-  viewerDrawBtn?.classList.toggle('draw-active', drawMode);
-  if (!drawMode) redrawAnnotations(); // clean up any in-progress stroke artifacts
-}
-
 async function clearAnnotations() {
   annoStrokes = [];
   annoCount   = 0;
+  myStrokeIds.length = 0;
+  updateUndoBtn();
   const ctx = drawCanvas.getContext('2d');
   if (ctx) ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
   if (sessionId && UPLOAD_SERVER) {
@@ -844,13 +971,25 @@ drawCanvas.addEventListener('touchstart', onDrawStart, { passive: false });
 drawCanvas.addEventListener('touchmove',  onDrawMove,  { passive: false });
 drawCanvas.addEventListener('touchend',   () => { void onDrawEnd(); });
 
-// Draw / clear buttons
+// Toolbar buttons
 drawBtn?.addEventListener('click',            toggleDrawMode);
 viewerDrawBtn?.addEventListener('click',      toggleDrawMode);
+laserBtn?.addEventListener('click',           toggleLaserMode);
+viewerLaserBtn?.addEventListener('click',     toggleLaserMode);
 clearDrawBtn?.addEventListener('click',       () => { void clearAnnotations(); });
 viewerClearDrawBtn?.addEventListener('click', () => { void clearAnnotations(); });
+undoDrawBtn?.addEventListener('click',        () => { void undoLastStroke(); });
+viewerUndoBtn?.addEventListener('click',      () => { void undoLastStroke(); });
 
-// Color swatch selection — shared between sharer and viewer swatches
+// Ctrl+Z keyboard shortcut
+document.addEventListener('keydown', (e: KeyboardEvent) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === 'z' && myStrokeIds.length > 0) {
+    e.preventDefault();
+    void undoLastStroke();
+  }
+});
+
+// Color swatch selection
 document.querySelectorAll<HTMLButtonElement>('.color-swatch').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.color-swatch').forEach(b => b.classList.remove('active'));
@@ -859,7 +998,7 @@ document.querySelectorAll<HTMLButtonElement>('.color-swatch').forEach(btn => {
   });
 });
 
-// Resize canvas when video-wrap changes size (widget resize, window resize)
+// Resize both canvases when video-wrap changes size
 new ResizeObserver(() => {
   if (playerViewEl.style.display !== 'none') resizeCanvas();
 }).observe(document.getElementById('video-wrap')!);
@@ -928,6 +1067,7 @@ function showPlayer(asSharer: boolean) {
   if (asSharer) startViewerCount();
   requestAnimationFrame(() => resizeCanvas());
   startAnnoPoll();
+  startLaserPoll();
 }
 
 function showForm() {

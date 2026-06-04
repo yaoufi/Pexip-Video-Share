@@ -176,7 +176,8 @@ const stopSignals = {}; // sessionId → true
 
 app.post('/stop-signal/:sessionId', (req, res) => {
   stopSignals[req.params.sessionId] = Date.now();
-  delete annotations[req.params.sessionId]; // clean up annotations when sharing stops
+  delete annotations[req.params.sessionId];    // clean up annotations when sharing stops
+  delete laserPositions[req.params.sessionId]; // clean up laser positions
   console.log(`[stop-signal] session=${req.params.sessionId}`);
   res.json({ ok: true });
 });
@@ -238,6 +239,37 @@ app.delete('/annotations/:sessionId', (req, res) => {
   annotations[req.params.sessionId] = [];
   console.log(`[annotations] cleared session=${req.params.sessionId}`);
   res.json({ ok: true });
+});
+
+app.delete('/annotations/:sessionId/:strokeId', (req, res) => {
+  const strokes = annotations[req.params.sessionId];
+  if (strokes) {
+    annotations[req.params.sessionId] = strokes.filter(s => s.id !== req.params.strokeId);
+  }
+  res.json({ ok: true });
+});
+
+// ── Laser pointer positions ────────────────────────────────────────────────
+// Each participant POSTs their cursor position while laser mode is active.
+// Positions auto-expire after 2 s (no explicit DELETE needed).
+const laserPositions = {}; // sessionId → { [userId]: { x, y, name, color, updatedAt } }
+
+app.post('/laser/:sessionId', (req, res) => {
+  const { userId, x, y, name, color } = req.body;
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!laserPositions[req.params.sessionId]) laserPositions[req.params.sessionId] = {};
+  laserPositions[req.params.sessionId][userId] = { x, y, name: name || 'Participant', color: color || '#ff4444', updatedAt: Date.now() };
+  res.json({ ok: true });
+});
+
+app.get('/laser/:sessionId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache');
+  const session = laserPositions[req.params.sessionId] ?? {};
+  const now = Date.now();
+  const active = Object.entries(session)
+    .filter(([, v]) => now - v.updatedAt < 2000)
+    .map(([id, v]) => ({ id, ...v }));
+  res.json({ lasers: active });
 });
 
 // ── Signaling: playback sync state ────────────────────────────────────────
