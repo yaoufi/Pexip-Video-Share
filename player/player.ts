@@ -79,6 +79,15 @@ const volumeBar        = document.getElementById('volume-bar')        as HTMLInp
 const viewerMuteBtn    = document.getElementById('viewer-mute-btn')   as HTMLButtonElement | null;
 const viewerVolumeBar  = document.getElementById('viewer-volume-bar') as HTMLInputElement  | null;
 
+// Draw overlay
+const drawCanvas         = document.getElementById('draw-canvas')          as HTMLCanvasElement;
+const drawBtn            = document.getElementById('draw-btn')             as HTMLButtonElement | null;
+const colorSwatchesEl    = document.getElementById('color-swatches')!;
+const clearDrawBtn       = document.getElementById('clear-draw-btn')       as HTMLButtonElement | null;
+const viewerDrawBtn      = document.getElementById('viewer-draw-btn')      as HTMLButtonElement | null;
+const viewerColorSwatches = document.getElementById('viewer-color-swatches')!;
+const viewerClearDrawBtn  = document.getElementById('viewer-clear-draw-btn') as HTMLButtonElement | null;
+
 // ── State ──────────────────────────────────────────────────────────────────
 let currentUrl    = '';
 let isSeeking_    = false;
@@ -91,6 +100,15 @@ let lastSyncAt    = 0;   // timestamp of last sync-state we applied (viewer debo
 // Stable per-session viewer ID (independent of selfUuid which arrives late)
 const viewerId = `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 let viewerRegistered = false;
+
+// ── Draw state ─────────────────────────────────────────────────────────────
+let drawMode     = false;
+let drawColor    = '#ff4444';
+let isDrawing    = false;
+let currentStroke: { x: number; y: number }[] = [];
+let annoStrokes:   { id: string; points: { x: number; y: number }[]; color: string; width: number }[] = [];
+let annoCount    = 0;   // stroke count at last redraw — used to skip no-op redraws
+let annoPollTimer: ReturnType<typeof setInterval> | null = null;
 
 // ── Source card switching (Local / YouTube) ───────────────────────────────
 function selectSource(type: 'local' | 'youtube') {
@@ -370,6 +388,11 @@ stopBtn.addEventListener('click', () => {
   }
   stopHeartbeat();
   stopSyncPoll();
+  stopAnnoPoll();
+  annoStrokes = []; annoCount = 0;
+  const ctx = drawCanvas.getContext('2d');
+  if (ctx) ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  if (drawMode) toggleDrawMode(); // reset draw mode for next share
   if (ytPlayer) { try { ytPlayer.destroy(); } catch {} ytPlayer = null; }
   videoEl.pause(); videoEl.src = '';
   videoEl.style.display = 'block'; // restore for next local video share
@@ -568,6 +591,7 @@ function startSyncPoll() {
 }
 function stopSyncPoll() {
   if (syncPollTimer) { clearInterval(syncPollTimer); syncPollTimer = null; }
+  stopAnnoPoll();
   unregisterAsViewer();
 }
 
@@ -681,6 +705,165 @@ plugin.events.applicationMessage.add((event: unknown) => {
   }
 });
 
+// ── Annotation drawing ─────────────────────────────────────────────────────
+
+function resizeCanvas() {
+  const rect = drawCanvas.getBoundingClientRect();
+  if (rect.width === 0) return;
+  drawCanvas.width  = rect.width;
+  drawCanvas.height = rect.height;
+  redrawAnnotations();
+}
+
+function getCanvasPos(e: MouseEvent | Touch): { x: number; y: number } {
+  const rect = drawCanvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - rect.left) / rect.width,
+    y: (e.clientY - rect.top)  / rect.height,
+  };
+}
+
+function redrawAnnotations() {
+  const ctx = drawCanvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  for (const stroke of annoStrokes) {
+    if (stroke.points.length < 2) continue;
+    ctx.beginPath();
+    ctx.strokeStyle = stroke.color;
+    ctx.lineWidth   = Math.max(2, stroke.width * drawCanvas.width / 800);
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    const [first, ...rest] = stroke.points;
+    ctx.moveTo(first.x * drawCanvas.width, first.y * drawCanvas.height);
+    for (const p of rest) ctx.lineTo(p.x * drawCanvas.width, p.y * drawCanvas.height);
+    ctx.stroke();
+  }
+}
+
+function onDrawStart(e: MouseEvent | TouchEvent) {
+  if (!drawMode) return;
+  e.preventDefault();
+  isDrawing = true;
+  const pos = 'touches' in e ? getCanvasPos(e.touches[0]) : getCanvasPos(e);
+  currentStroke = [pos];
+}
+
+function onDrawMove(e: MouseEvent | TouchEvent) {
+  if (!drawMode || !isDrawing) return;
+  e.preventDefault();
+  const pos = 'touches' in e ? getCanvasPos(e.touches[0]) : getCanvasPos(e);
+  currentStroke.push(pos);
+  const ctx = drawCanvas.getContext('2d');
+  if (!ctx || currentStroke.length < 2) return;
+  const prev = currentStroke[currentStroke.length - 2];
+  ctx.beginPath();
+  ctx.strokeStyle = drawColor;
+  ctx.lineWidth   = Math.max(2, 3 * drawCanvas.width / 800);
+  ctx.lineCap     = 'round';
+  ctx.lineJoin    = 'round';
+  ctx.moveTo(prev.x * drawCanvas.width, prev.y * drawCanvas.height);
+  ctx.lineTo(pos.x  * drawCanvas.width, pos.y  * drawCanvas.height);
+  ctx.stroke();
+}
+
+async function onDrawEnd() {
+  if (!drawMode || !isDrawing) return;
+  isDrawing = false;
+  if (currentStroke.length < 2) { currentStroke = []; return; }
+  const stroke = {
+    id:     `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    points: currentStroke,
+    color:  drawColor,
+    width:  3,
+  };
+  currentStroke = [];
+  annoStrokes.push(stroke);
+  annoCount = annoStrokes.length;
+  if (sessionId && UPLOAD_SERVER) {
+    fetch(`${UPLOAD_SERVER}/annotations/${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ stroke }),
+    }).catch(() => undefined);
+  }
+}
+
+function toggleDrawMode() {
+  drawMode = !drawMode;
+  drawCanvas.classList.toggle('active', drawMode);
+  colorSwatchesEl.classList.toggle('visible', drawMode);
+  viewerColorSwatches.classList.toggle('visible', drawMode);
+  if (clearDrawBtn)      clearDrawBtn.style.display      = drawMode ? '' : 'none';
+  if (viewerClearDrawBtn) viewerClearDrawBtn.style.display = drawMode ? '' : 'none';
+  drawBtn?.classList.toggle('draw-active', drawMode);
+  viewerDrawBtn?.classList.toggle('draw-active', drawMode);
+  if (!drawMode) redrawAnnotations(); // clean up any in-progress stroke artifacts
+}
+
+async function clearAnnotations() {
+  annoStrokes = [];
+  annoCount   = 0;
+  const ctx = drawCanvas.getContext('2d');
+  if (ctx) ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+  if (sessionId && UPLOAD_SERVER) {
+    fetch(`${UPLOAD_SERVER}/annotations/${sessionId}`, {
+      method: 'DELETE', headers: authHeaders(),
+    }).catch(() => undefined);
+  }
+}
+
+function startAnnoPoll() {
+  if (annoPollTimer) return;
+  annoPollTimer = setInterval(async () => {
+    if (!sessionId || !UPLOAD_SERVER) return;
+    try {
+      const res  = await fetch(`${UPLOAD_SERVER}/annotations/${sessionId}`, {
+        cache: 'no-store', headers: authHeaders(),
+      });
+      const data = await res.json() as { strokes: typeof annoStrokes };
+      if (data.strokes.length !== annoCount) {
+        annoStrokes = data.strokes;
+        annoCount   = data.strokes.length;
+        redrawAnnotations();
+      }
+    } catch { /* server unreachable */ }
+  }, 500);
+}
+
+function stopAnnoPoll() {
+  if (annoPollTimer) { clearInterval(annoPollTimer); annoPollTimer = null; }
+}
+
+// Canvas events
+drawCanvas.addEventListener('mousedown',  onDrawStart);
+drawCanvas.addEventListener('mousemove',  onDrawMove);
+drawCanvas.addEventListener('mouseup',    () => { void onDrawEnd(); });
+drawCanvas.addEventListener('mouseleave', () => { void onDrawEnd(); });
+drawCanvas.addEventListener('touchstart', onDrawStart, { passive: false });
+drawCanvas.addEventListener('touchmove',  onDrawMove,  { passive: false });
+drawCanvas.addEventListener('touchend',   () => { void onDrawEnd(); });
+
+// Draw / clear buttons
+drawBtn?.addEventListener('click',            toggleDrawMode);
+viewerDrawBtn?.addEventListener('click',      toggleDrawMode);
+clearDrawBtn?.addEventListener('click',       () => { void clearAnnotations(); });
+viewerClearDrawBtn?.addEventListener('click', () => { void clearAnnotations(); });
+
+// Color swatch selection — shared between sharer and viewer swatches
+document.querySelectorAll<HTMLButtonElement>('.color-swatch').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.color-swatch').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    drawColor = btn.dataset.color ?? '#ff4444';
+  });
+});
+
+// Resize canvas when video-wrap changes size (widget resize, window resize)
+new ResizeObserver(() => {
+  if (playerViewEl.style.display !== 'none') resizeCanvas();
+}).observe(document.getElementById('video-wrap')!);
+
 // ── UI helpers ─────────────────────────────────────────────────────────────
 // ── Viewer presence ────────────────────────────────────────────────────────
 
@@ -743,6 +926,8 @@ function showPlayer(asSharer: boolean) {
     registerAsViewer();
   }
   if (asSharer) startViewerCount();
+  requestAnimationFrame(() => resizeCanvas());
+  startAnnoPoll();
 }
 
 function showForm() {
