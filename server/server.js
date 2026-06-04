@@ -22,7 +22,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500 MB
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2 GB
 });
 
 const app = express();
@@ -176,6 +176,7 @@ const stopSignals = {}; // sessionId → true
 
 app.post('/stop-signal/:sessionId', (req, res) => {
   stopSignals[req.params.sessionId] = Date.now();
+  delete annotations[req.params.sessionId]; // clean up annotations when sharing stops
   console.log(`[stop-signal] session=${req.params.sessionId}`);
   res.json({ ok: true });
 });
@@ -213,6 +214,30 @@ app.get('/pending-share/:sessionId', (req, res) => {
     return res.json(share);
   }
   res.json({ url: null });
+});
+
+// ── Annotations ───────────────────────────────────────────────────────────
+// Any participant can draw on the canvas overlay. Strokes are stored per
+// session and polled by all participants every 500 ms.
+const annotations = {}; // sessionId → [{ id, points:[{x,y}], color, width }]
+
+app.post('/annotations/:sessionId', (req, res) => {
+  const { stroke } = req.body;
+  if (!stroke) return res.status(400).json({ error: 'stroke required' });
+  if (!annotations[req.params.sessionId]) annotations[req.params.sessionId] = [];
+  annotations[req.params.sessionId].push(stroke);
+  res.json({ ok: true });
+});
+
+app.get('/annotations/:sessionId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache');
+  res.json({ strokes: annotations[req.params.sessionId] ?? [] });
+});
+
+app.delete('/annotations/:sessionId', (req, res) => {
+  annotations[req.params.sessionId] = [];
+  console.log(`[annotations] cleared session=${req.params.sessionId}`);
+  res.json({ ok: true });
 });
 
 // ── Signaling: playback sync state ────────────────────────────────────────
