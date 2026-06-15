@@ -2,6 +2,7 @@ const express    = require('express');
 const multer     = require('multer');
 const path       = require('path');
 const fs         = require('fs');
+const https      = require('https');
 const { execFile } = require('child_process');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -247,6 +248,23 @@ app.delete('/annotations/:sessionId/:strokeId', (req, res) => {
     annotations[req.params.sessionId] = strokes.filter(s => s.id !== req.params.strokeId);
   }
   res.json({ ok: true });
+});
+
+// ── YouTube embeddability check ────────────────────────────────────────────
+// Hits YouTube's oEmbed API server-side to check if a video allows embedding
+// before the sharer broadcasts it to other participants.
+// Returns { embeddable: true/false, status: <http status> }
+app.get('/check-youtube/:videoId', (req, res) => {
+  if (!/^[a-zA-Z0-9_-]{11}$/.test(req.params.videoId)) {
+    return res.status(400).json({ error: 'Invalid video ID' });
+  }
+  const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(`https://www.youtube.com/watch?v=${req.params.videoId}`)}&format=json`;
+  const request = https.get(oembedUrl, { timeout: 5000 }, (r) => {
+    res.json({ embeddable: r.statusCode === 200, status: r.statusCode });
+    r.resume(); // drain without buffering
+  });
+  request.on('error', (err) => res.json({ embeddable: true, error: String(err) }));
+  request.on('timeout', () => { request.destroy(); res.json({ embeddable: true, error: 'timeout' }); });
 });
 
 // ── Laser pointer positions ────────────────────────────────────────────────
