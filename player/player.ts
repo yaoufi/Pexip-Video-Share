@@ -140,8 +140,24 @@ shareYoutubeBtn.addEventListener('click', async () => {
   if (!UPLOAD_SERVER) {
     setStatus('No upload server configured.', true); return;
   }
-  setStatus('Sharing…');
+
+  setStatus('Checking video…');
   shareYoutubeBtn.disabled = true;
+
+  // Pre-check: warn sharer if embedding is disabled before broadcasting to participants
+  try {
+    const check = await fetch(`${UPLOAD_SERVER}/check-youtube/${id}`, { headers: authHeaders() });
+    const checkData = await check.json() as { embeddable: boolean };
+    if (!checkData.embeddable) {
+      setStatus('⚠ This video cannot be embedded — the owner has disabled it. Try a different video.', true);
+      shareYoutubeBtn.disabled = false;
+      return;
+    }
+  } catch {
+    // Server unreachable — continue and let the player surface the error
+  }
+
+  setStatus('Sharing…');
 
   try {
     await fetch(`${UPLOAD_SERVER}/pending-share`, {
@@ -275,18 +291,35 @@ function loadYouTubePlayer(videoId: string, startTime: number, autoplay: boolean
     if (ytPlayer) { ytPlayer.destroy(); ytPlayer = null; }
     ytPlayer = new (window as Record<string,unknown>).YT.Player('yt-container', {
       videoId,
+      host: 'https://www.youtube-nocookie.com',
       width: '100%', height: '100%',
       playerVars: {
-        start: Math.floor(startTime),
-        autoplay: autoplay ? 1 : 0,
-        rel: 0, modestbranding: 1,
-        origin: window.location.origin,
+        start:          Math.floor(startTime),
+        autoplay:       autoplay ? 1 : 0,
+        rel:            0,
+        origin:         window.location.origin,
+        enablejsapi:    1,
+        iv_load_policy: 3,
       },
       events: {
-        onReady: () => { startSeekUpdater(); },
+        onReady: () => { setStatus(''); startSeekUpdater(); },
         onStateChange: (e: { data: number }) => {
           // 1 = playing, 2 = paused — post sync so viewers follow
           if (isSharer && (e.data === 1 || e.data === 2)) postSyncState();
+        },
+        onError: (e: { data: number }) => {
+          const reasons: Record<number, string> = {
+            2:   'Invalid video URL.',
+            5:   'Video cannot play in an embedded player.',
+            100: 'Video not found or is private.',
+            101: 'The video owner has disabled embedding.',
+            150: 'The video owner has disabled embedding.',
+          };
+          const msg = reasons[e.data] ?? `YouTube error (code ${e.data}).`;
+          setStatus(
+            `⚠ ${msg} <a href="https://www.youtube.com/watch?v=${videoId}" target="_blank" style="color:#7ab4ff">Open on YouTube ↗</a>`,
+            true,
+          );
         },
       },
     }) as unknown as YTPlayer;

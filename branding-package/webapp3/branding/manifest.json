@@ -1,9 +1,6 @@
 {
   "version": 0,
-  "meta": {
-    "name": "DEFAULT",
-    "brandVersion": "n/a"
-  },
+  "meta": { "name": "VideoShare2" },
   "images": {},
   "translations": {},
   "videoShare": {
