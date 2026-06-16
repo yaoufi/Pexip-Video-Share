@@ -37,7 +37,8 @@ plugin.events.me.add((event: unknown) => {
 function getYouTubeId(url: string): string | null {
   return url.match(/(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([a-zA-Z0-9_-]{11})/)?.[1] ?? null;
 }
-const isYouTube = !!getYouTubeId(initialUrl);
+const isYouTube    = !!getYouTubeId(initialUrl);
+const isWhiteboard = params.get('mode') === 'whiteboard';
 
 // ── DOM ────────────────────────────────────────────────────────────────────
 const shareFormEl   = document.getElementById('share-form')!;
@@ -65,12 +66,15 @@ const pushSyncBtn   = document.getElementById('push-sync-btn') as HTMLButtonElem
 const pullSyncBtn   = document.getElementById('pull-sync-btn')!;
 const stopBtn          = document.getElementById('stop-btn')!;
 // Share form elements
-const cardLocal        = document.getElementById('card-local')!;
-const cardYouTube      = document.getElementById('card-youtube')!;
-const localPanel       = document.getElementById('local-panel')!;
-const youtubePanel     = document.getElementById('youtube-panel')!;
-const youtubeUrlInput  = document.getElementById('youtube-url-input') as HTMLInputElement;
-const shareYoutubeBtn  = document.getElementById('share-youtube-btn') as HTMLButtonElement;
+const cardLocal           = document.getElementById('card-local')!;
+const cardYouTube         = document.getElementById('card-youtube')!;
+const cardWhiteboard      = document.getElementById('card-whiteboard')!;
+const localPanel          = document.getElementById('local-panel')!;
+const youtubePanel        = document.getElementById('youtube-panel')!;
+const whiteboardPanel     = document.getElementById('whiteboard-panel')!;
+const youtubeUrlInput     = document.getElementById('youtube-url-input') as HTMLInputElement;
+const shareYoutubeBtn     = document.getElementById('share-youtube-btn') as HTMLButtonElement;
+const startWhiteboardBtn  = document.getElementById('start-whiteboard-btn') as HTMLButtonElement;
 const fullscreenBtn    = document.getElementById('fullscreen-btn')    as HTMLButtonElement | null;
 const viewerFsBtn      = document.getElementById('viewer-fs-btn')     as HTMLButtonElement | null;
 const speedSelect      = document.getElementById('speed-select')      as HTMLSelectElement | null;
@@ -119,15 +123,18 @@ let laserPollTimer: ReturnType<typeof setInterval> | null = null;
 let lastLaserPost = 0;
 const myStrokeIds: string[] = []; // IDs of strokes drawn by this participant (for undo)
 
-// ── Source card switching (Local / YouTube) ───────────────────────────────
-function selectSource(type: 'local' | 'youtube') {
+// ── Source card switching (Local / YouTube / Whiteboard) ─────────────────
+function selectSource(type: 'local' | 'youtube' | 'whiteboard') {
   cardLocal.classList.toggle('active', type === 'local');
   cardYouTube.classList.toggle('active', type === 'youtube');
-  localPanel.style.display    = type === 'local'   ? 'flex' : 'none';
-  youtubePanel.style.display  = type === 'youtube' ? 'flex' : 'none';
+  cardWhiteboard.classList.toggle('active', type === 'whiteboard');
+  localPanel.style.display      = type === 'local'       ? 'flex' : 'none';
+  youtubePanel.style.display    = type === 'youtube'     ? 'flex' : 'none';
+  whiteboardPanel.style.display = type === 'whiteboard'  ? 'flex' : 'none';
 }
-cardLocal.addEventListener('click',   () => selectSource('local'));
-cardYouTube.addEventListener('click', () => selectSource('youtube'));
+cardLocal.addEventListener('click',      () => selectSource('local'));
+cardYouTube.addEventListener('click',    () => selectSource('youtube'));
+cardWhiteboard.addEventListener('click', () => selectSource('whiteboard'));
 
 // ── YouTube URL share ─────────────────────────────────────────────────────
 shareYoutubeBtn.addEventListener('click', async () => {
@@ -421,7 +428,7 @@ seekBarEl.addEventListener('change', () => {
 });
 
 stopBtn.addEventListener('click', () => {
-  deleteUploadedFile(currentUrl);
+  if (!isWhiteboard) deleteUploadedFile(currentUrl);
   stopViewerCount();
   if (sessionId && UPLOAD_SERVER) {
     fetch(`${UPLOAD_SERVER}/stop-signal/${sessionId}`, {
@@ -1016,6 +1023,9 @@ document.querySelectorAll<HTMLButtonElement>('.color-swatch').forEach(btn => {
     document.querySelectorAll('.color-swatch').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     drawColor = btn.dataset.color ?? '#ff4444';
+    // Eraser gets a distinct cursor; regular colors restore crosshair
+    drawCanvas.style.cursor = btn.dataset.eraser ? 'cell' : '';
+    updateCanvasState();
   });
 });
 
@@ -1066,6 +1076,36 @@ function stopViewerCount() {
   if (viewerCountTimer) { clearInterval(viewerCountTimer); viewerCountTimer = null; }
 }
 
+// ── Whiteboard ─────────────────────────────────────────────────────────────
+async function startWhiteboard() {
+  if (!UPLOAD_SERVER) { setStatus('No upload server configured.', true); return; }
+  startWhiteboardBtn.disabled = true;
+  setStatus('Starting whiteboard…');
+  await fetch(`${UPLOAD_SERVER}/pending-share`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ sessionId, url: 'whiteboard://', sharerName: selfName }),
+  }).catch(() => undefined);
+  setStatus('');
+  showWhiteboard(true);
+}
+
+function showWhiteboard(asSharer: boolean) {
+  document.body.classList.add('whiteboard');
+  shareFormEl.style.display  = 'none';
+  playerViewEl.style.display = 'flex';
+  controlsEl.style.display   = asSharer ? 'flex' : 'none';
+  viewerBar.style.display    = asSharer ? 'none'  : 'block';
+  setDrawMode(true);
+  requestAnimationFrame(() => resizeCanvas());
+  startAnnoPoll();
+  startLaserPoll();
+  if (!asSharer) registerAsViewer();
+  if (asSharer) startViewerCount();
+}
+
+startWhiteboardBtn.addEventListener('click', () => { void startWhiteboard(); });
+
 function showPlayer(asSharer: boolean) {
   shareFormEl.style.display  = 'none';
   playerViewEl.style.display = 'flex';
@@ -1107,7 +1147,9 @@ function fmt(s: number): string {
 }
 
 // ── Initial render ─────────────────────────────────────────────────────────
-if (isSharer && !initialUrl) {
+if (isWhiteboard) {
+  showWhiteboard(isSharer);
+} else if (isSharer && !initialUrl) {
   // Fresh share — show the upload form
   showForm();
 } else if (isSharer && initialUrl) {

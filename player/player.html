@@ -55,10 +55,10 @@
       letter-spacing: 0.01em;
     }
 
-    /* Source cards — Local vs YouTube */
+    /* Source cards — Local / YouTube / Whiteboard */
     .source-cards {
       display: grid;
-      grid-template-columns: 1fr 1fr;
+      grid-template-columns: 1fr 1fr 1fr;
       gap: 10px;
     }
 
@@ -83,6 +83,9 @@
 
     /* YouTube icon */
     .yt-icon { color: #ff0000; }
+
+    /* Whiteboard panel */
+    #whiteboard-panel { display: none; flex-direction: column; gap: 10px; align-items: center; padding: 12px 0; }
 
     /* YouTube URL input */
     #youtube-panel { display: none; flex-direction: column; gap: 10px; }
@@ -419,6 +422,33 @@
       z-index: 6;
       pointer-events: none;
     }
+
+    /* ─── Whiteboard mode ────────────────────────────────────────────────── */
+    body.whiteboard #video-wrap      { background: #fff; }
+    body.whiteboard video            { display: none !important; }
+    body.whiteboard #play-overlay,
+    body.whiteboard #unmute-bar,
+    body.whiteboard #peer-badge      { display: none !important; }
+    /* hide playback controls in sharer bar */
+    body.whiteboard #play-pause-btn,
+    body.whiteboard #seek-bar,
+    body.whiteboard #time-display,
+    body.whiteboard #speed-select,
+    body.whiteboard .vol-wrap,
+    body.whiteboard #viewer-presence,
+    body.whiteboard #fullscreen-btn  { display: none !important; }
+    /* hide playback controls in viewer bar */
+    body.whiteboard #viewer-bar .vol-wrap,
+    body.whiteboard #pull-sync-btn,
+    body.whiteboard #viewer-fs-btn   { display: none !important; }
+
+    /* Eraser swatch — white dot with dashed border */
+    .eraser-swatch {
+      background: #fff !important;
+      border: 2px dashed rgba(180,180,180,0.8) !important;
+      font-size: 10px; color: #888; line-height: 1;
+    }
+    .eraser-swatch.active { border-color: rgba(255,255,255,0.85) !important; }
   </style>
 </head>
 <body>
@@ -445,6 +475,11 @@
         <span class="card-label">YouTube</span>
         <span class="card-sub">Paste a YouTube URL</span>
       </div>
+      <div class="source-card" id="card-whiteboard">
+        <span class="card-icon">🖊</span>
+        <span class="card-label">Whiteboard</span>
+        <span class="card-sub">Blank canvas for all</span>
+      </div>
     </div>
 
     <!-- Local panel -->
@@ -458,6 +493,12 @@
       </label>
       <div id="progress-wrap"><div id="progress-fill"></div></div>
       <button class="btn btn-primary" id="share-btn" disabled>Upload &amp; Share</button>
+    </div>
+
+    <!-- Whiteboard panel -->
+    <div id="whiteboard-panel">
+      <p style="color:var(--text-sub);font-size:12px;text-align:center">Opens a shared blank canvas.<br>Everyone in the call can draw.</p>
+      <button class="btn btn-primary" id="start-whiteboard-btn">🖊 Start Whiteboard</button>
     </div>
 
     <!-- YouTube panel -->
@@ -525,8 +566,9 @@
       <div class="color-swatches" id="color-swatches">
         <button class="color-swatch active" data-color="#ff4444" style="background:#ff4444" title="Red"></button>
         <button class="color-swatch" data-color="#ffee00" style="background:#ffee00" title="Yellow"></button>
-        <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="White"></button>
         <button class="color-swatch" data-color="#44bbff" style="background:#44bbff" title="Blue"></button>
+        <button class="color-swatch" data-color="#22cc55" style="background:#22cc55" title="Green"></button>
+        <button class="color-swatch eraser-swatch" data-color="#ffffff" data-eraser="true" title="Eraser">✕</button>
       </div>
       <button class="ctrl-btn" id="undo-draw-btn" title="Undo last stroke (Ctrl+Z)" style="display:none">↩</button>
       <button class="ctrl-btn" id="clear-draw-btn" title="Clear all drawings" style="display:none">🗑</button>
@@ -548,8 +590,9 @@
       <div class="color-swatches" id="viewer-color-swatches">
         <button class="color-swatch active" data-color="#ff4444" style="background:#ff4444" title="Red"></button>
         <button class="color-swatch" data-color="#ffee00" style="background:#ffee00" title="Yellow"></button>
-        <button class="color-swatch" data-color="#ffffff" style="background:#ffffff" title="White"></button>
         <button class="color-swatch" data-color="#44bbff" style="background:#44bbff" title="Blue"></button>
+        <button class="color-swatch" data-color="#22cc55" style="background:#22cc55" title="Green"></button>
+        <button class="color-swatch eraser-swatch" data-color="#ffffff" data-eraser="true" title="Eraser">✕</button>
       </div>
       <button class="pill-btn" id="viewer-undo-draw-btn" title="Undo last stroke (Ctrl+Z)" style="display:none">↩ Undo</button>
       <button class="pill-btn" id="viewer-clear-draw-btn" title="Clear all drawings" style="display:none">🗑 Clear</button>
