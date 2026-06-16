@@ -147,18 +147,20 @@ function startPolling(sessionId: string) {
 
       clearInterval(pollTimer!); pollTimer = null;
 
-      const payload: SyncMessage = {
-        type:       'video:open',
-        url:        data.url,
-        sharerName: selfName,
-        senderUuid: selfUuid,
-        sessionId,
-      };
-      // Track video for sharer so re-opening the widget doesn't restart the share
       currentVideo = { url: data.url, sharerName: selfName, sessionId };
 
-      // Retry up to 3 times — Pexip sometimes drops messages
-      void sendReliable(payload as Record<string, unknown>);
+      if (data.url === 'whiteboard://') {
+        void sendReliable({ type: 'whiteboard:open', sessionId, sharerName: selfName, senderUuid: selfUuid });
+      } else {
+        const payload: SyncMessage = {
+          type:       'video:open',
+          url:        data.url,
+          sharerName: selfName,
+          senderUuid: selfUuid,
+          sessionId,
+        };
+        void sendReliable(payload as Record<string, unknown>);
+      }
 
       // Now poll for stop signal — widget POSTs here when Stop is clicked
       startStopPolling(sessionId);
@@ -183,13 +185,15 @@ function startStopPolling(sessionId: string) {
       console.log('[vs2] stop-signal detected for session', sessionId);
 
       clearInterval(stopPollTimer!); stopPollTimer = null;
+      const stoppedVideo = currentVideo;
       isSharing    = false;
       currentVideo = null;
       if (activeWidget) {
         try { await activeWidget.remove(); } catch { /* already gone */ }
         activeWidget = null;
       }
-      void sendReliable({ type: 'video:stop', senderUuid: selfUuid });
+      const stopType = stoppedVideo?.url === 'whiteboard://' ? 'whiteboard:stop' : 'video:stop';
+      void sendReliable({ type: stopType, senderUuid: selfUuid });
     } catch { /* server unreachable */ }
   }, 500); // 500 ms — fast enough for near-instant stop on remote
 }
@@ -215,8 +219,16 @@ shareBtn.onClick.add(async () => {
     } catch { /* server unreachable — assume still active */ }
 
     if (currentVideo) {
-      if (isSharing) {
-        // Sharer closed/minimised — re-open at the last known playback position
+      const isWhiteboardSession = currentVideo.url === 'whiteboard://';
+
+      if (isSharing && isWhiteboardSession) {
+        // Sharer re-opening whiteboard
+        await openWidget(
+          { role: 'sharer', mode: 'whiteboard', selfUuid, sharerName: selfName, sessionId: currentVideo.sessionId },
+          'Whiteboard',
+        );
+      } else if (isSharing) {
+        // Sharer closed/minimised video — re-open at the last known playback position
         let initTime = 0;
         try {
           const r = await fetch(`${uploadServer}/sync-state/${currentVideo.sessionId}`, {
@@ -231,8 +243,15 @@ shareBtn.onClick.add(async () => {
             initTime: String(initTime), initPlaying: 'false' },
           'Video Share',
         );
+      } else if (isWhiteboardSession) {
+        // Viewer re-opening whiteboard
+        await openWidget(
+          { role: 'viewer', mode: 'whiteboard', selfUuid, selfName,
+            sessionId: currentVideo.sessionId, sharerName: currentVideo.sharerName },
+          `${currentVideo.sharerName}'s Whiteboard`,
+        );
       } else {
-        // Viewer re-opening
+        // Viewer re-opening video
         await openWidget(
           { role: 'viewer', url: currentVideo.url, sharerName: currentVideo.sharerName,
             selfUuid, selfName, sessionId: currentVideo.sessionId },
@@ -266,7 +285,7 @@ shareBtn.onClick.add(async () => {
 plugin.events.applicationMessage.add(async (event: unknown) => {
   try {
     const msg = (event as { message: SyncMessage }).message;
-    if (!('type' in msg) || !msg.type.startsWith('video:')) return;
+    if (!('type' in msg) || (!msg.type.startsWith('video:') && !msg.type.startsWith('whiteboard:'))) return;
     if (selfUuid && msg.senderUuid === selfUuid) return;
 
     const sid = (msg as unknown as Record<string, string>).sessionId ?? '';
@@ -299,6 +318,22 @@ plugin.events.applicationMessage.add(async (event: unknown) => {
             `${msg.sharerName} is sharing`,
           );
         }
+        break;
+
+      case 'whiteboard:open':
+        if (isSharing) break;
+        currentVideo = { url: 'whiteboard://', sharerName: msg.sharerName, sessionId: sid };
+        await openWidget(
+          { role: 'viewer', mode: 'whiteboard', selfUuid, selfName, sessionId: sid, sharerName: msg.sharerName },
+          `${msg.sharerName}'s Whiteboard`,
+        );
+        break;
+
+      case 'whiteboard:stop':
+        isSharing     = false;
+        currentVideo  = null;
+        lastOpenedUrl = '';
+        if (activeWidget) { await activeWidget.remove(); activeWidget = null; }
         break;
     }
   } catch (err) {
