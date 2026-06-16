@@ -67,7 +67,7 @@ function playerUrl(extra: Record<string, string>): string {
   return `${base}?${new URLSearchParams(extra)}`;
 }
 
-async function openWidget(params: Record<string, string>, title: string) {
+async function openWidget(params: Record<string, string>, title: string, large = false) {
   if (activeWidget) {
     try { await activeWidget.remove(); } catch { /* already removed or stale */ }
     activeWidget = null;
@@ -78,10 +78,9 @@ async function openWidget(params: Record<string, string>, title: string) {
     title,
     draggable: true,
     isVisible: true,
-    dimensions: {
-      width:  { xs: '100%', lg: '760px' },
-      height: { xs: '100%', lg: '520px' },
-    },
+    dimensions: large
+      ? { width: { xs: '100%', lg: '1100px' }, height: { xs: '100%', lg: '700px' } }
+      : { width: { xs: '100%', lg: '760px' },  height: { xs: '100%', lg: '520px' } },
   });
 }
 
@@ -100,13 +99,13 @@ async function sendReliable(payload: Record<string, unknown>) {
 // ── Settings button — configure server URL ─────────────────────────────────
 const settingsBtn = await plugin.ui.addButton({
   position: 'settingsMenu',
-  label: 'Video Share — Server Settings',
+  label: 'Multimedia — Server Settings',
   inMeetingOnly: false,
 });
 
 settingsBtn.onClick.add(async () => {
   const result = await plugin.ui.showForm({
-    title: 'Video Share — Server Settings',
+    title: 'Multimedia — Server Settings',
     description: 'Override the server URL and API key from manifest.json. Leave blank to use the manifest values.',
     form: {
       elements: {
@@ -151,6 +150,9 @@ function startPolling(sessionId: string) {
 
       if (data.url === 'whiteboard://') {
         void sendReliable({ type: 'whiteboard:open', sessionId, sharerName: selfName, senderUuid: selfUuid });
+      } else if (data.url.startsWith('slides://')) {
+        const slideCount = parseInt(data.url.replace('slides://', ''), 10);
+        void sendReliable({ type: 'slides:open', sessionId, sharerName: selfName, slideCount, senderUuid: selfUuid } satisfies SyncMessage as Record<string, unknown>);
       } else {
         const payload: SyncMessage = {
           type:       'video:open',
@@ -192,7 +194,11 @@ function startStopPolling(sessionId: string) {
         try { await activeWidget.remove(); } catch { /* already gone */ }
         activeWidget = null;
       }
-      const stopType = stoppedVideo?.url === 'whiteboard://' ? 'whiteboard:stop' : 'video:stop';
+      const stopType = stoppedVideo?.url === 'whiteboard://'
+        ? 'whiteboard:stop'
+        : stoppedVideo?.url.startsWith('slides://')
+          ? 'slides:stop'
+          : 'video:stop';
       void sendReliable({ type: stopType, senderUuid: selfUuid });
     } catch { /* server unreachable */ }
   }, 500); // 500 ms — fast enough for near-instant stop on remote
@@ -202,7 +208,7 @@ function startStopPolling(sessionId: string) {
 const shareBtn = await plugin.ui.addButton({
   position: 'toolbar',
   icon: 'IconPlayRound',
-  tooltip: 'Share Video',
+  tooltip: 'Multimedia',
 });
 
 shareBtn.onClick.add(async () => {
@@ -220,8 +226,25 @@ shareBtn.onClick.add(async () => {
 
     if (currentVideo) {
       const isWhiteboardSession = currentVideo.url === 'whiteboard://';
+      const isSlidesSession     = currentVideo.url.startsWith('slides://');
 
-      if (isSharing && isWhiteboardSession) {
+      if (isSharing && isSlidesSession) {
+        const slideCount = currentVideo.url.replace('slides://', '');
+        await openWidget(
+          { role: 'sharer', mode: 'slides', selfUuid, sharerName: selfName,
+            sessionId: currentVideo.sessionId, slideCount },
+          'Slides',
+          true,
+        );
+      } else if (!isSharing && isSlidesSession) {
+        const slideCount = currentVideo.url.replace('slides://', '');
+        await openWidget(
+          { role: 'viewer', mode: 'slides', selfUuid, selfName,
+            sessionId: currentVideo.sessionId, sharerName: currentVideo.sharerName, slideCount },
+          `${currentVideo.sharerName}'s Slides`,
+          true,
+        );
+      } else if (isSharing && isWhiteboardSession) {
         // Sharer re-opening whiteboard
         await openWidget(
           { role: 'sharer', mode: 'whiteboard', selfUuid, sharerName: selfName, sessionId: currentVideo.sessionId },
@@ -241,7 +264,7 @@ shareBtn.onClick.add(async () => {
           { role: 'sharer', selfUuid, sharerName: selfName,
             sessionId: currentVideo.sessionId, url: currentVideo.url,
             initTime: String(initTime), initPlaying: 'false' },
-          'Video Share',
+          'Multimedia',
         );
       } else if (isWhiteboardSession) {
         // Viewer re-opening whiteboard
@@ -265,7 +288,7 @@ shareBtn.onClick.add(async () => {
   // Sharer opening the upload form
   if (!uploadServer) {
     await plugin.ui.showToast({
-      message: 'No upload server configured. Open "Video Share Settings" in the ⋮ menu.',
+      message: 'No upload server configured. Open "Multimedia Settings" in the ⋮ menu.',
       isDanger: true,
     });
     return;
@@ -277,7 +300,8 @@ shareBtn.onClick.add(async () => {
   startPolling(currentShareId);
   await openWidget(
     { role: 'sharer', selfUuid, sharerName: selfName, sessionId: currentShareId },
-    'Share Video',
+    'Multimedia',
+    true,
   );
 });
 
@@ -285,7 +309,7 @@ shareBtn.onClick.add(async () => {
 plugin.events.applicationMessage.add(async (event: unknown) => {
   try {
     const msg = (event as { message: SyncMessage }).message;
-    if (!('type' in msg) || (!msg.type.startsWith('video:') && !msg.type.startsWith('whiteboard:'))) return;
+    if (!('type' in msg) || (!msg.type.startsWith('video:') && !msg.type.startsWith('whiteboard:') && !msg.type.startsWith('slides:'))) return;
     if (selfUuid && msg.senderUuid === selfUuid) return;
 
     const sid = (msg as unknown as Record<string, string>).sessionId ?? '';
@@ -330,6 +354,24 @@ plugin.events.applicationMessage.add(async (event: unknown) => {
         break;
 
       case 'whiteboard:stop':
+        isSharing     = false;
+        currentVideo  = null;
+        lastOpenedUrl = '';
+        if (activeWidget) { await activeWidget.remove(); activeWidget = null; }
+        break;
+
+      case 'slides:open':
+        if (isSharing) break;
+        currentVideo = { url: `slides://${msg.slideCount}`, sharerName: msg.sharerName, sessionId: sid };
+        await openWidget(
+          { role: 'viewer', mode: 'slides', selfUuid, selfName,
+            sessionId: sid, sharerName: msg.sharerName, slideCount: String(msg.slideCount) },
+          `${msg.sharerName}'s Slides`,
+          true,
+        );
+        break;
+
+      case 'slides:stop':
         isSharing     = false;
         currentVideo  = null;
         lastOpenedUrl = '';

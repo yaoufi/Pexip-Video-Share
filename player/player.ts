@@ -39,6 +39,8 @@ function getYouTubeId(url: string): string | null {
 }
 const isYouTube    = !!getYouTubeId(initialUrl);
 const isWhiteboard = params.get('mode') === 'whiteboard';
+const isSlides     = params.get('mode') === 'slides';
+const slideCount   = parseInt(params.get('slideCount') ?? '1', 10);
 
 // ── DOM ────────────────────────────────────────────────────────────────────
 const shareFormEl   = document.getElementById('share-form')!;
@@ -69,9 +71,27 @@ const stopBtn          = document.getElementById('stop-btn')!;
 const cardLocal           = document.getElementById('card-local')!;
 const cardYouTube         = document.getElementById('card-youtube')!;
 const cardWhiteboard      = document.getElementById('card-whiteboard')!;
+const cardSlides          = document.getElementById('card-slides')!;
 const localPanel          = document.getElementById('local-panel')!;
 const youtubePanel        = document.getElementById('youtube-panel')!;
 const whiteboardPanel     = document.getElementById('whiteboard-panel')!;
+const slidesPanel         = document.getElementById('slides-panel')!;
+const slidesFileInput     = document.getElementById('slides-file-input') as HTMLInputElement;
+const slidesFileDrop      = document.getElementById('slides-drop')!;
+const slidesFileLabel     = document.getElementById('slides-file-label')!;
+const slidesProgressWrap  = document.getElementById('slides-progress-wrap')!;
+const slidesProgressFill  = document.getElementById('slides-progress-fill') as HTMLElement;
+const slidesStatusMsg     = document.getElementById('slides-status-msg')!;
+const startSlidesBtn      = document.getElementById('start-slides-btn') as HTMLButtonElement;
+const slidesView          = document.getElementById('slides-view')!;
+const slideImg            = document.getElementById('slide-img') as HTMLImageElement;
+const slideCounter        = document.getElementById('slide-counter')!;
+const prevSlideBtn        = document.getElementById('prev-slide-btn') as HTMLButtonElement;
+const nextSlideBtn        = document.getElementById('next-slide-btn') as HTMLButtonElement;
+const zoomSlideBtn        = document.getElementById('zoom-slide-btn') as HTMLButtonElement;
+const fullscreenSlideBtn  = document.getElementById('fullscreen-slide-btn') as HTMLButtonElement;
+const presenterBanner     = document.getElementById('presenter-banner')!;
+const presenterSlideNum   = document.getElementById('presenter-slide-num')!;
 const youtubeUrlInput     = document.getElementById('youtube-url-input') as HTMLInputElement;
 const shareYoutubeBtn     = document.getElementById('share-youtube-btn') as HTMLButtonElement;
 const startWhiteboardBtn  = document.getElementById('start-whiteboard-btn') as HTMLButtonElement;
@@ -110,6 +130,15 @@ let lastSyncAt    = 0;   // timestamp of last sync-state we applied (viewer debo
 const viewerId = `v-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 let viewerRegistered = false;
 
+// ── Slides state ───────────────────────────────────────────────────────────
+let currentSlideIndex  = 0;
+let totalSlides        = slideCount;
+let isFollowing        = true;
+let presenterIndex     = 0;
+let slideStatePollTimer: ReturnType<typeof setInterval> | null = null;
+let currentZoom        = 1;
+const ZOOM_LEVELS      = [1, 1.5, 2] as const;
+
 // ── Draw / laser state ─────────────────────────────────────────────────────
 let drawMode     = false;
 let laserMode    = false;
@@ -123,18 +152,21 @@ let laserPollTimer: ReturnType<typeof setInterval> | null = null;
 let lastLaserPost = 0;
 const myStrokeIds: string[] = []; // IDs of strokes drawn by this participant (for undo)
 
-// ── Source card switching (Local / YouTube / Whiteboard) ─────────────────
-function selectSource(type: 'local' | 'youtube' | 'whiteboard') {
-  cardLocal.classList.toggle('active', type === 'local');
-  cardYouTube.classList.toggle('active', type === 'youtube');
+// ── Source card switching (Local / YouTube / Whiteboard / Slides) ─────────
+function selectSource(type: 'local' | 'youtube' | 'whiteboard' | 'slides') {
+  cardLocal.classList.toggle('active',      type === 'local');
+  cardYouTube.classList.toggle('active',    type === 'youtube');
   cardWhiteboard.classList.toggle('active', type === 'whiteboard');
-  localPanel.style.display      = type === 'local'       ? 'flex' : 'none';
-  youtubePanel.style.display    = type === 'youtube'     ? 'flex' : 'none';
-  whiteboardPanel.style.display = type === 'whiteboard'  ? 'flex' : 'none';
+  cardSlides.classList.toggle('active',     type === 'slides');
+  localPanel.style.display      = type === 'local'       ? 'flex'  : 'none';
+  youtubePanel.style.display    = type === 'youtube'     ? 'flex'  : 'none';
+  whiteboardPanel.style.display = type === 'whiteboard'  ? 'flex'  : 'none';
+  slidesPanel.style.display     = type === 'slides'      ? 'flex'  : 'none';
 }
 cardLocal.addEventListener('click',      () => selectSource('local'));
 cardYouTube.addEventListener('click',    () => selectSource('youtube'));
 cardWhiteboard.addEventListener('click', () => selectSource('whiteboard'));
+cardSlides.addEventListener('click',     () => selectSource('slides'));
 
 // ── YouTube URL share ─────────────────────────────────────────────────────
 shareYoutubeBtn.addEventListener('click', async () => {
@@ -199,6 +231,15 @@ function pickFile(f: File) {
   shareBtn.disabled     = false;
   setStatus('');
 }
+
+// ── Slides file picker ─────────────────────────────────────────────────────
+slidesFileInput.addEventListener('change', () => {
+  const f = slidesFileInput.files?.[0];
+  if (!f) return;
+  slidesFileLabel.textContent = f.name;
+  startSlidesBtn.disabled = false;
+  slidesStatusMsg.textContent = '';
+});
 
 // ── Upload & share ─────────────────────────────────────────────────────────
 shareBtn.addEventListener('click', async () => {
@@ -428,7 +469,8 @@ seekBarEl.addEventListener('change', () => {
 });
 
 stopBtn.addEventListener('click', () => {
-  if (!isWhiteboard) deleteUploadedFile(currentUrl);
+  if (!isWhiteboard && !isSlides) deleteUploadedFile(currentUrl);
+  if (slideStatePollTimer) { clearInterval(slideStatePollTimer); slideStatePollTimer = null; }
   stopViewerCount();
   if (sessionId && UPLOAD_SERVER) {
     fetch(`${UPLOAD_SERVER}/stop-signal/${sessionId}`, {
@@ -1106,6 +1148,197 @@ function showWhiteboard(asSharer: boolean) {
 
 startWhiteboardBtn.addEventListener('click', () => { void startWhiteboard(); });
 
+// ── Slides ─────────────────────────────────────────────────────────────────
+startSlidesBtn.addEventListener('click', () => { void startSlideShare(); });
+
+async function startSlideShare() {
+  const file = slidesFileInput.files?.[0];
+  if (!file) return;
+  if (!UPLOAD_SERVER) { slidesStatusMsg.textContent = 'No upload server configured.'; return; }
+
+  startSlidesBtn.disabled = true;
+  slidesProgressWrap.style.display = 'block';
+  slidesStatusMsg.textContent = 'Converting…';
+
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('sessionId', sessionId);
+
+  try {
+    const xhr = new XMLHttpRequest();
+    const result = await new Promise<{ slideCount: number }>((resolve, reject) => {
+      xhr.open('POST', `${UPLOAD_SERVER}/convert-slides`);
+      if (API_KEY) xhr.setRequestHeader('Authorization', `Bearer ${API_KEY}`);
+      xhr.upload.addEventListener('progress', e => {
+        if (e.lengthComputable) slidesProgressFill.style.width = `${Math.round(e.loaded / e.total * 100)}%`;
+      });
+      xhr.addEventListener('load', () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText) as { slideCount: number }); }
+          catch { reject(new Error('Unexpected server response')); }
+        } else {
+          reject(new Error(`Conversion failed (HTTP ${xhr.status})`));
+        }
+      });
+      xhr.addEventListener('error', () => reject(new Error('Network error')));
+      xhr.send(fd);
+    });
+
+    slidesProgressWrap.style.display = 'none';
+    slidesStatusMsg.textContent = '';
+
+    totalSlides = result.slideCount;
+    await fetch(`${UPLOAD_SERVER}/pending-share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ sessionId, url: `slides://${result.slideCount}`, sharerName: selfName }),
+    }).catch(() => undefined);
+
+    showSlides(true, result.slideCount);
+  } catch (err) {
+    slidesStatusMsg.textContent = (err as Error).message;
+    slidesProgressWrap.style.display = 'none';
+    startSlidesBtn.disabled = false;
+  }
+}
+
+function showSlides(asSharer: boolean, count: number) {
+  document.body.classList.add('slides');
+  shareFormEl.style.display  = 'none';
+  playerViewEl.style.display = 'flex';
+  controlsEl.style.display   = asSharer ? 'flex' : 'none';
+  viewerBar.style.display    = asSharer ? 'none'  : 'block';
+  totalSlides = count;
+  goToSlide(0);
+  requestAnimationFrame(() => resizeCanvas());
+  startAnnoPoll();
+  startLaserPoll();
+  if (!asSharer) {
+    registerAsViewer();
+    startSlideStatePoll();
+  }
+  if (asSharer) startViewerCount();
+}
+
+function goToSlide(index: number) {
+  const clamped = Math.max(0, Math.min(totalSlides - 1, index));
+  currentSlideIndex = clamped;
+  // Fetch as blob so the <img> src is a blob: URL — avoids CSP img-src restrictions
+  // that block direct external URLs while allowing blob: URIs.
+  fetch(`${UPLOAD_SERVER}/slides/${sessionId}/${clamped}`, { cache: 'no-store' })
+    .then(r => r.blob())
+    .then(blob => {
+      const prev = slideImg.src;
+      slideImg.src = URL.createObjectURL(blob);
+      if (prev.startsWith('blob:')) URL.revokeObjectURL(prev);
+      // Re-apply zoom after image loads so pixel dimensions stay correct
+      if (currentZoom !== 1) applyZoom(currentZoom);
+    })
+    .catch(() => undefined);
+  // Reset zoom when changing slides for clean navigation
+  if (currentZoom !== 1) applyZoom(1);
+  slideCounter.textContent = `${clamped + 1} / ${totalSlides}`;
+  prevSlideBtn.disabled = clamped === 0;
+  nextSlideBtn.disabled = clamped === totalSlides - 1;
+
+  if (isSharer) {
+    fetch(`${UPLOAD_SERVER}/slide-state/${sessionId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ index: clamped }),
+    }).catch(() => undefined);
+    // Clear annotations when presenter changes slide
+    void clearAnnotations();
+  } else {
+    updatePresenterBanner();
+  }
+}
+
+function updatePresenterBanner() {
+  const show = !isFollowing && presenterIndex !== currentSlideIndex;
+  presenterBanner.style.display = show ? 'block' : 'none';
+  if (show) presenterSlideNum.textContent = String(presenterIndex + 1);
+}
+
+// ── Slide zoom ─────────────────────────────────────────────────────────────
+function applyZoom(level: number) {
+  currentZoom = level;
+  const container = slideImg.parentElement as HTMLElement;
+  if (level === 1) {
+    container.style.overflow = 'hidden';
+    slideImg.style.width  = '100%';
+    slideImg.style.height = '100%';
+  } else {
+    const w = container.clientWidth  || 800;
+    const h = container.clientHeight || 550;
+    container.style.overflow = 'auto';
+    slideImg.style.width  = `${Math.round(w * level)}px`;
+    slideImg.style.height = `${Math.round(h * level)}px`;
+  }
+  zoomSlideBtn.textContent = `🔍 ${level}×`;
+}
+
+zoomSlideBtn.addEventListener('click', () => {
+  const idx  = ZOOM_LEVELS.indexOf(currentZoom as typeof ZOOM_LEVELS[number]);
+  const next = ZOOM_LEVELS[(idx + 1) % ZOOM_LEVELS.length];
+  applyZoom(next);
+});
+
+// ── Slide fullscreen ───────────────────────────────────────────────────────
+fullscreenSlideBtn.addEventListener('click', () => {
+  if (!document.fullscreenElement) {
+    slidesView.requestFullscreen().catch(() => undefined);
+    fullscreenSlideBtn.textContent = '✕';
+    fullscreenSlideBtn.title = 'Exit fullscreen';
+  } else {
+    document.exitFullscreen().catch(() => undefined);
+    fullscreenSlideBtn.textContent = '⛶';
+    fullscreenSlideBtn.title = 'Fullscreen';
+  }
+});
+
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement) {
+    fullscreenSlideBtn.textContent = '⛶';
+    fullscreenSlideBtn.title = 'Fullscreen';
+  }
+});
+
+function startSlideStatePoll() {
+  if (slideStatePollTimer) return;
+  slideStatePollTimer = setInterval(async () => {
+    if (!sessionId || !UPLOAD_SERVER) return;
+    try {
+      const res  = await fetch(`${UPLOAD_SERVER}/slide-state/${sessionId}`, { cache: 'no-store', headers: authHeaders() });
+      const data = await res.json() as { index: number };
+      presenterIndex = data.index;
+      if (isFollowing) {
+        goToSlide(data.index);
+      } else {
+        updatePresenterBanner();
+      }
+    } catch { /* server unreachable */ }
+  }, 1000);
+}
+
+presenterBanner.addEventListener('click', () => {
+  isFollowing = true;
+  presenterBanner.style.display = 'none';
+  goToSlide(presenterIndex);
+});
+
+prevSlideBtn.addEventListener('click', () => {
+  if (!isSharer) isFollowing = false;
+  goToSlide(currentSlideIndex - 1);
+  if (!isSharer) updatePresenterBanner();
+});
+
+nextSlideBtn.addEventListener('click', () => {
+  if (!isSharer) isFollowing = false;
+  goToSlide(currentSlideIndex + 1);
+  if (!isSharer) updatePresenterBanner();
+});
+
 function showPlayer(asSharer: boolean) {
   shareFormEl.style.display  = 'none';
   playerViewEl.style.display = 'flex';
@@ -1147,7 +1380,9 @@ function fmt(s: number): string {
 }
 
 // ── Initial render ─────────────────────────────────────────────────────────
-if (isWhiteboard) {
+if (isSlides) {
+  showSlides(isSharer, slideCount);
+} else if (isWhiteboard) {
   showWhiteboard(isSharer);
 } else if (isSharer && !initialUrl) {
   // Fresh share — show the upload form

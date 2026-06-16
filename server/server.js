@@ -6,10 +6,12 @@ const https      = require('https');
 const { execFile } = require('child_process');
 
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
+const SLIDES_DIR = path.join(UPLOAD_DIR, 'slides');
 const PORT       = process.env.PORT ?? 4001;
 const API_KEY    = process.env.VS2_API_KEY ?? '';
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+if (!fs.existsSync(SLIDES_DIR)) fs.mkdirSync(SLIDES_DIR, { recursive: true });
 
 // ── Storage: timestamped filenames (same approach as M&M upload.js) ────────
 const storage = multer.diskStorage({
@@ -26,6 +28,15 @@ const upload = multer({
   limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2 GB
 });
 
+const slideUpload = multer({
+  storage,
+  limits: { fileSize: 200 * 1024 * 1024 }, // 200 MB
+  fileFilter: (_req, file, cb) => {
+    const ok = /\.(pptx|pdf)$/i.test(file.originalname);
+    cb(ok ? null : new Error('Only .pptx and .pdf files are allowed'), ok);
+  },
+});
+
 const app = express();
 app.use(express.json());
 
@@ -40,6 +51,12 @@ app.use((_req, res, next) => {
   next();
 });
 
+// ── Helper: run a CLI command as a promise ─────────────────────────────────
+function runCmd(cmd, args) {
+  return new Promise((resolve, reject) =>
+    execFile(cmd, args, { timeout: 120_000 }, (err) => err ? reject(err) : resolve()));
+}
+
 // ── Serve uploaded files — NO auth required ────────────────────────────────
 // Files use random UUID-based names so the URL itself is the secret.
 // The <video> element cannot send Authorization headers, so this must be open.
@@ -47,6 +64,18 @@ app.use((_req, res, next) => {
 app.use('/uploads', express.static(UPLOAD_DIR, {
   setHeaders: (res) => { res.setHeader('Accept-Ranges', 'bytes'); },
 }));
+
+// ── Serve slide images — NO auth required ─────────────────────────────────
+// <img> elements cannot send Authorization headers, so this must be open.
+// The random sessionId in the path is the effective secret.
+app.get('/slides/:sessionId/:index', (req, res) => {
+  const sessionId = path.basename(req.params.sessionId);
+  const index     = parseInt(req.params.index, 10);
+  if (isNaN(index) || index < 0) return res.status(400).end();
+  const file = path.join(SLIDES_DIR, sessionId, `${index}.png`);
+  if (!fs.existsSync(file)) return res.status(404).end();
+  res.sendFile(file);
+});
 
 // ── Health check — NO auth required (monitoring) ───────────────────────────
 app.get('/health', (_req, res) => res.json({ ok: true }));
@@ -179,6 +208,8 @@ app.post('/stop-signal/:sessionId', (req, res) => {
   stopSignals[req.params.sessionId] = Date.now();
   delete annotations[req.params.sessionId];    // clean up annotations when sharing stops
   delete laserPositions[req.params.sessionId]; // clean up laser positions
+  delete slideStates[req.params.sessionId];    // clean up slide state
+  fs.rm(path.join(SLIDES_DIR, req.params.sessionId), { recursive: true, force: true }, () => {});
   console.log(`[stop-signal] session=${req.params.sessionId}`);
   res.json({ ok: true });
 });
@@ -265,6 +296,67 @@ app.get('/check-youtube/:videoId', (req, res) => {
   });
   request.on('error', (err) => res.json({ embeddable: true, error: String(err) }));
   request.on('timeout', () => { request.destroy(); res.json({ embeddable: true, error: 'timeout' }); });
+});
+
+// ── Slide conversion ──────────────────────────────────────────────────────
+// Accepts .pptx or .pdf, converts to PNG images via LibreOffice + pdftoppm.
+// Images stored at SLIDES_DIR/<sessionId>/<index>.png (0-indexed).
+app.post('/convert-slides', slideUpload.single('file'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file received.' });
+  const { sessionId } = req.body;
+  if (!sessionId) return res.status(400).json({ error: 'sessionId required' });
+
+  const inputPath = req.file.path;
+  const outDir    = path.join(SLIDES_DIR, path.basename(sessionId));
+  fs.mkdirSync(outDir, { recursive: true });
+
+  let pdfPath = inputPath;
+  try {
+    if (/\.pptx$/i.test(req.file.originalname)) {
+      // Step 1: PPTX → PDF
+      const tmpDir = path.dirname(inputPath);
+      await runCmd('libreoffice', [
+        '--headless', '--convert-to', 'pdf', '--outdir', tmpDir, inputPath,
+      ]);
+      pdfPath = inputPath.replace(/\.[^.]+$/, '.pdf');
+    }
+
+    // Step 2: PDF → PNGs  (pdftoppm names: slide-1.png, slide-2.png, …)
+    await runCmd('pdftoppm', ['-r', '150', '-png', pdfPath, path.join(outDir, 'slide')]);
+
+    // Rename to 0-indexed: slide-1.png → 0.png, slide-2.png → 1.png, …
+    const files = fs.readdirSync(outDir)
+      .filter(f => /^slide-\d+\.png$/.test(f))
+      .sort((a, b) => parseInt(a.match(/\d+/)[0]) - parseInt(b.match(/\d+/)[0]));
+
+    files.forEach((f, i) =>
+      fs.renameSync(path.join(outDir, f), path.join(outDir, `${i}.png`)));
+
+    console.log(`[convert-slides] session=${sessionId} slides=${files.length}`);
+    res.json({ slideCount: files.length });
+  } catch (err) {
+    fs.rm(outDir, { recursive: true, force: true }, () => {});
+    console.error(`[convert-slides] error: ${err}`);
+    res.status(500).json({ error: String(err) });
+  } finally {
+    fs.unlink(inputPath, () => {});
+    if (pdfPath !== inputPath) fs.unlink(pdfPath, () => {});
+  }
+});
+
+// ── Slide state (current slide index) ─────────────────────────────────────
+const slideStates = {}; // sessionId → { index }
+
+app.post('/slide-state/:sessionId', (req, res) => {
+  const index = parseInt(req.body.index, 10);
+  if (isNaN(index)) return res.status(400).json({ error: 'index required' });
+  slideStates[req.params.sessionId] = { index };
+  res.json({ ok: true });
+});
+
+app.get('/slide-state/:sessionId', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache');
+  res.json(slideStates[req.params.sessionId] ?? { index: 0 });
 });
 
 // ── Laser pointer positions ────────────────────────────────────────────────

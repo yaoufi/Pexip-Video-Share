@@ -5,4 +5,6 @@ export type SyncMessage =
   | { type: 'video:sync-state';   time: number; playing: boolean; senderUuid: string }
   | { type: 'video:heartbeat';    url: string; sharerName: string; time: number; playing: boolean; senderUuid: string; sessionId: string }
   | { type: 'whiteboard:open';    sessionId: string; sharerName: string; senderUuid: string }
-  | { type: 'whiteboard:stop';    senderUuid: string };
+  | { type: 'whiteboard:stop';    senderUuid: string }
+  | { type: 'slides:open';        sessionId: string; sharerName: string; slideCount: number; senderUuid: string }
+  | { type: 'slides:stop';        senderUuid: string };

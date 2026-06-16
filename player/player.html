@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Video Share</title>
+  <title>Multimedia</title>
   <style>
     /* ─── Design tokens ───────────────────────────────────────────────────────
        Dark navy palette matching Pexip webapp3 aesthetics.
@@ -55,10 +55,10 @@
       letter-spacing: 0.01em;
     }
 
-    /* Source cards — Local / YouTube / Whiteboard */
+    /* Source cards — 2×2 grid */
     .source-cards {
       display: grid;
-      grid-template-columns: 1fr 1fr 1fr;
+      grid-template-columns: 1fr 1fr;
       gap: 10px;
     }
 
@@ -442,6 +442,32 @@
     body.whiteboard #pull-sync-btn,
     body.whiteboard #viewer-fs-btn   { display: none !important; }
 
+    /* ─── Slides mode ───────────────────────────────────────────────────────── */
+    body.slides video            { display: none !important; }
+    body.slides #play-overlay,
+    body.slides #unmute-bar,
+    body.slides #peer-badge      { display: none !important; }
+    /* hide video playback controls in sharer bar */
+    body.slides #play-pause-btn,
+    body.slides #seek-bar,
+    body.slides #time-display,
+    body.slides #speed-select,
+    body.slides .vol-wrap,
+    body.slides #viewer-presence,
+    body.slides #fullscreen-btn  { display: none !important; }
+    /* hide video playback controls in viewer bar */
+    body.slides #viewer-bar .vol-wrap,
+    body.slides #pull-sync-btn,
+    body.slides #viewer-fs-btn   { display: none !important; }
+    /* show the slides view */
+    body.slides #slides-view     { display: flex !important; }
+    /* annotation canvas sits above slide image */
+    body.slides #draw-canvas,
+    body.slides #laser-canvas    { z-index: 7; }
+    /* Fullscreen: slides-view fills screen, keep nav visible */
+    #slides-view:fullscreen      { display: flex; flex-direction: column; background: #000; }
+    #slides-view:-webkit-full-screen { display: flex; flex-direction: column; background: #000; }
+
     /* Eraser swatch — white dot with dashed border */
     .eraser-swatch {
       background: #fff !important;
@@ -480,6 +506,11 @@
         <span class="card-label">Whiteboard</span>
         <span class="card-sub">Blank canvas for all</span>
       </div>
+      <div class="source-card" id="card-slides">
+        <span class="card-icon">📊</span>
+        <span class="card-label">Slides</span>
+        <span class="card-sub">PPTX or PDF</span>
+      </div>
     </div>
 
     <!-- Local panel -->
@@ -499,6 +530,22 @@
     <div id="whiteboard-panel">
       <p style="color:var(--text-sub);font-size:12px;text-align:center">Opens a shared blank canvas.<br>Everyone in the call can draw.</p>
       <button class="btn btn-primary" id="start-whiteboard-btn">🖊 Start Whiteboard</button>
+    </div>
+
+    <!-- Slides panel -->
+    <div id="slides-panel" style="display:none;flex-direction:column;gap:10px;">
+      <label id="slides-drop" style="border:2px dashed var(--border);border-radius:var(--radius);padding:28px 20px;text-align:center;cursor:pointer;color:var(--text-sub);display:flex;flex-direction:column;align-items:center;gap:8px;transition:border-color .15s,background .15s;">
+        <input type="file" id="slides-file-input" accept=".pptx,.pdf" style="position:absolute;width:0;height:0;opacity:0;overflow:hidden;pointer-events:none;" />
+        <div style="font-size:30px;">📊</div>
+        <div>Click to select a file</div>
+        <small style="font-size:11px;color:#444;">PowerPoint (.pptx) or PDF — up to 200 MB</small>
+        <span id="slides-file-label" style="font-size:12px;color:var(--primary);word-break:break-all;min-height:16px;"></span>
+      </label>
+      <div id="slides-progress-wrap" style="height:3px;border-radius:2px;background:var(--surface2);overflow:hidden;display:none;">
+        <div id="slides-progress-fill" style="height:100%;background:var(--primary);width:0%;transition:width .15s;"></div>
+      </div>
+      <div class="status-msg" id="slides-status-msg"></div>
+      <button class="btn btn-primary" id="start-slides-btn" disabled>📊 Share Slides</button>
     </div>
 
     <!-- YouTube panel -->
@@ -529,6 +576,29 @@
       <div id="peer-badge">
         <div class="dot"></div>
         <span id="peer-name">viewer</span> is watching
+      </div>
+
+      <!-- Slides view — shown in slides mode instead of video -->
+      <div id="slides-view" style="display:none;position:absolute;inset:0;flex-direction:column;">
+        <div style="flex:1;position:relative;overflow:hidden;background:#fff;">
+          <img id="slide-img" style="width:100%;height:100%;object-fit:contain;display:block;" alt="" />
+        </div>
+        <div id="slide-nav" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:var(--surface);border-top:1px solid var(--border);flex-shrink:0;">
+          <div style="display:flex;align-items:center;gap:8px;">
+            <button class="btn btn-primary" id="prev-slide-btn" style="padding:0 16px;">◀</button>
+            <span id="slide-counter" style="font-size:13px;color:var(--text-sub);min-width:64px;text-align:center;">1 / 1</span>
+            <button class="btn btn-primary" id="next-slide-btn" style="padding:0 16px;">▶</button>
+          </div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <button class="btn" id="zoom-slide-btn" title="Zoom" style="font-size:12px;padding:0 10px;min-width:52px;">🔍 1×</button>
+            <button class="btn" id="fullscreen-slide-btn" title="Fullscreen" style="font-size:15px;padding:0 10px;">⛶</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Presenter-follow banner (viewers only, shown when browsing independently) -->
+      <div id="presenter-banner" style="display:none;position:absolute;bottom:60px;left:50%;transform:translateX(-50%);background:var(--primary);color:#fff;padding:8px 18px;border-radius:24px;font-size:13px;font-weight:600;cursor:pointer;z-index:10;white-space:nowrap;box-shadow:0 4px 16px rgba(45,127,249,0.4);">
+        Presenter is on slide <span id="presenter-slide-num">1</span> — click to follow
       </div>
 
       <!-- Annotation canvas — floats above video, activated by draw/laser mode -->
