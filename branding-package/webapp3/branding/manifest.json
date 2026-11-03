@@ -5,7 +5,7 @@
   "translations": {},
   "videoShare": {
     "uploadServer": "https://pexip-apps.yaoufi.com",
-    "apiKey": "REMOVED"
+    "apiKey": ""
   },
   "plugins": [
     {
